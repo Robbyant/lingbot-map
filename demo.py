@@ -22,6 +22,7 @@ import argparse
 import glob
 import os
 import time
+from datetime import datetime
 
 # Must be set before `import torch` / any CUDA init. Reduces the reserved-vs-allocated
 # memory gap by letting the caching allocator grow segments on demand instead of
@@ -41,6 +42,112 @@ from lingbot_map.utils.load_fn import load_and_preprocess_images
 # =============================================================================
 # Image loading
 # =============================================================================
+
+def capture_webcam_frames(
+    camera_index=0,
+    capture_dir=None,
+    num_frames=48,
+    fps=4,
+    width=1280,
+    height=720,
+    warmup_frames=12,
+    preview=True,
+    mirror_preview=True,
+):
+    """Capture a finite webcam sequence to an image folder."""
+    if capture_dir is None:
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        capture_dir = os.path.join("captures", f"webcam_{stamp}")
+    os.makedirs(capture_dir, exist_ok=True)
+
+    backends = []
+    if hasattr(cv2, "CAP_AVFOUNDATION"):
+        backends.append(cv2.CAP_AVFOUNDATION)
+    backends.append(None)
+
+    cap = None
+    for backend in backends:
+        candidate = (
+            cv2.VideoCapture(camera_index, backend)
+            if backend is not None
+            else cv2.VideoCapture(camera_index)
+        )
+        if candidate.isOpened():
+            cap = candidate
+            break
+        candidate.release()
+
+    if cap is None:
+        raise RuntimeError(
+            f"Could not open webcam index {camera_index}. On macOS, allow camera "
+            "access for the terminal or app that launches this script."
+        )
+
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+    cap.set(cv2.CAP_PROP_FPS, fps)
+
+    for _ in range(max(0, warmup_frames)):
+        cap.read()
+
+    print(
+        f"Capturing {num_frames} webcam frames at ~{fps} FPS "
+        f"to {capture_dir}. Move the camera slowly for parallax."
+    )
+    if preview:
+        print("Press q or Esc in the preview window to stop early.")
+
+    saved_paths = []
+    next_capture_time = time.monotonic()
+    capture_interval = 1.0 / max(fps, 0.1)
+
+    try:
+        while len(saved_paths) < num_frames:
+            ok, frame = cap.read()
+            if not ok:
+                time.sleep(0.02)
+                continue
+
+            now = time.monotonic()
+            if now >= next_capture_time:
+                out_path = os.path.join(capture_dir, f"{len(saved_paths):06d}.jpg")
+                cv2.imwrite(out_path, frame)
+                saved_paths.append(out_path)
+                next_capture_time = now + capture_interval
+
+            if preview:
+                preview_frame = cv2.flip(frame, 1) if mirror_preview else frame.copy()
+                status = f"{len(saved_paths)}/{num_frames} frames"
+                cv2.putText(
+                    preview_frame,
+                    status,
+                    (20, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    1.0,
+                    (0, 255, 0),
+                    2,
+                    cv2.LINE_AA,
+                )
+                cv2.imshow("LingBot-Map webcam capture", preview_frame)
+                key = cv2.waitKey(1) & 0xFF
+                if key in (ord("q"), 27):
+                    break
+            else:
+                time.sleep(0.005)
+    finally:
+        cap.release()
+        if preview:
+            cv2.destroyWindow("LingBot-Map webcam capture")
+
+    if len(saved_paths) < 2:
+        raise RuntimeError(
+            f"Only captured {len(saved_paths)} frame(s); at least 2 are required "
+            "for reconstruction."
+        )
+
+    print(f"Captured {len(saved_paths)} frames.")
+    return capture_dir
+
 
 def load_images(image_folder=None, video_path=None, fps=10, image_ext=".jpg,.png",
                 first_k=None, stride=1, image_size=518, patch_size=14, num_workers=8):
@@ -237,6 +344,26 @@ def main():
     # Input
     parser.add_argument("--image_folder", type=str, default=None)
     parser.add_argument("--video_path", type=str, default=None)
+    parser.add_argument("--webcam", action="store_true",
+                        help="Capture a short sequence from the local webcam, then reconstruct it")
+    parser.add_argument("--camera_index", type=int, default=0,
+                        help="Webcam index for --webcam. The built-in camera is usually 0.")
+    parser.add_argument("--capture_dir", type=str, default=None,
+                        help="Folder for saved webcam frames (default: captures/webcam_<timestamp>/)")
+    parser.add_argument("--capture_frames", type=int, default=48,
+                        help="Number of webcam frames to save before reconstruction")
+    parser.add_argument("--capture_fps", type=float, default=4.0,
+                        help="Sampling FPS for webcam capture")
+    parser.add_argument("--camera_width", type=int, default=1280,
+                        help="Requested webcam capture width")
+    parser.add_argument("--camera_height", type=int, default=720,
+                        help="Requested webcam capture height")
+    parser.add_argument("--warmup_frames", type=int, default=12,
+                        help="Webcam frames to discard before saving")
+    parser.add_argument("--preview", action=argparse.BooleanOptionalAction, default=True,
+                        help="Show a local webcam preview while capturing")
+    parser.add_argument("--mirror_preview", action=argparse.BooleanOptionalAction, default=True,
+                        help="Mirror the preview only; saved frames stay unmirrored")
     parser.add_argument("--fps", type=int, default=10)
     parser.add_argument("--first_k", type=int, default=None)
     parser.add_argument("--stride", type=int, default=1)
@@ -292,10 +419,28 @@ def main():
                         help="Export stride-sampled, resized/cropped images to this folder")
 
     args = parser.parse_args()
-    assert args.image_folder or args.video_path, \
-        "Provide --image_folder or --video_path"
+    input_count = sum([
+        args.image_folder is not None,
+        args.video_path is not None,
+        args.webcam,
+    ])
+    assert input_count == 1, \
+        "Provide exactly one input: --image_folder, --video_path, or --webcam"
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    if args.webcam:
+        args.image_folder = capture_webcam_frames(
+            camera_index=args.camera_index,
+            capture_dir=args.capture_dir,
+            num_frames=args.capture_frames,
+            fps=args.capture_fps,
+            width=args.camera_width,
+            height=args.camera_height,
+            warmup_frames=args.warmup_frames,
+            preview=args.preview,
+            mirror_preview=args.mirror_preview,
+        )
 
     # ── Load images & model ──────────────────────────────────────────────────
     t0 = time.time()
