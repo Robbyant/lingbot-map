@@ -12,10 +12,12 @@ dependencies = [
     "tqdm",
     "scipy",
     "torchvision",
+    "matplotlib",
+    "viser>=0.2.23",
 ]
 
 [project.optional-dependencies]
-vis = ["viser>=0.2.23", "trimesh", "matplotlib", "onnxruntime", "requests"]
+vis = ["trimesh", "onnxruntime", "requests"]
 demo = ["lingbot-map[vis]"]
 
 [build-system]
