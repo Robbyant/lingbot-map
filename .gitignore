@@ -7,6 +7,7 @@ build/
 *.so
 .eggs/
 demo_render/
+outputs/
 CLAUDE.md
 .claude/
 .agents/
