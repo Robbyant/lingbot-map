@@ -208,38 +208,93 @@ python demo.py --model_path /path/to/checkpoint.pt \
 
 `--camera_num_iterations` defaults to `4`; setting it to `1` skips three refinement passes in the camera head (and shrinks its KV cache by 4×).
 
-# 🐳 Docker Quick Start
+# 🐳 Docker
 
-Run the demo on your own images without a local Python environment.
+Run the full demo — including model download, inference, and 3D viewer — without any local Python or CUDA setup.
 
-### Prerequisites
-- [Docker](https://docs.docker.com/get-docker/) with [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)
-- An NVIDIA GPU with CUDA 12.8 support
+## Image Design
 
-### 1. Build the image
+| Layer | Detail |
+|:---|:---|
+| Base image | `pytorch/pytorch:2.9.1-cuda12.8-cudnn9-devel` (public, no auth required) |
+| Attention backend | [FlashInfer](https://github.com/flashinfer-ai/flashinfer) for paged KV-cache; auto-falls back to PyTorch SDPA if unavailable |
+| Visualisation | [viser](https://github.com/nerfstudio-project/viser) web viewer exposed on port **8080** |
+| Model resolution | `docker/entrypoint.sh` checks `/model/` at startup and auto-downloads from HuggingFace when no `.pt` file is found |
+| Data access | Images and model weights are provided via **volume mounts** — nothing user-specific is baked into the image |
+
+```
+lingbot-map-demo
+├── /app/              ← source code + built-in example scenes
+│   └── example/{church,oxford,university,loop}/
+├── /model/            ← mount a host directory here to cache the model
+└── /data/             ← mount your images or video here
+```
+
+## Prerequisites
+
+- [Docker](https://docs.docker.com/get-docker/) with the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)
+- An NVIDIA GPU (CUDA 12.8 driver)
+
+## Build
 
 ```bash
+git clone https://github.com/YoshiRi/lingbot-map-docker.git
+cd lingbot-map-docker
 docker build -t lingbot-map-demo .
 ```
 
-### 2. Run with your images
+## Try the Built-in Example Scenes
 
-Place your images in a local `images/` folder, then:
+The four example scenes from `example/` are already baked into the image at `/app/example/`.
+No extra data mount is needed — just provide a writable directory for the model cache.
+
+```bash
+# Church (outdoor, sky masking recommended)
+docker run --gpus all \
+  -v $(pwd)/model:/model \
+  -p 8080:8080 \
+  lingbot-map-demo \
+  --image_folder /app/example/church --mask_sky
+
+# Oxford
+docker run --gpus all \
+  -v $(pwd)/model:/model \
+  -p 8080:8080 \
+  lingbot-map-demo \
+  --image_folder /app/example/oxford --mask_sky
+
+# University
+docker run --gpus all \
+  -v $(pwd)/model:/model \
+  -p 8080:8080 \
+  lingbot-map-demo \
+  --image_folder /app/example/university --mask_sky
+
+# Loop (loop-closure trajectory, no sky masking needed)
+docker run --gpus all \
+  -v $(pwd)/model:/model \
+  -p 8080:8080 \
+  lingbot-map-demo \
+  --image_folder /app/example/loop
+```
+
+On **first run** the model is downloaded from HuggingFace and cached in `./model/`; subsequent runs start immediately.
+Open **http://localhost:8080** in your browser once inference completes.
+
+## Run with Your Own Images
+
+Place your images (`.jpg` / `.png`) in a local folder, then mount it:
 
 ```bash
 docker run --gpus all \
-  -v $(pwd)/images:/data/images \
+  -v /path/to/your/images:/data/images \
   -v $(pwd)/model:/model \
   -p 8080:8080 \
   lingbot-map-demo \
   --image_folder /data/images
 ```
 
-Open **http://localhost:8080** in your browser to see the interactive 3D viewer.
-
-The model is **downloaded automatically** on the first run and cached in `./model/`.
-
-### Run with a video file
+## Run with a Video File
 
 ```bash
 docker run --gpus all \
@@ -250,26 +305,27 @@ docker run --gpus all \
   --video_path /data/video.mp4 --fps 10
 ```
 
-### Using docker-compose
+## docker-compose
+
+Edit `docker-compose.yml` to set your image folder and model variant, then:
 
 ```bash
-# Put your images in ./images/, then:
+# Put your images in ./images/
 docker compose up
 ```
 
-Edit `docker-compose.yml` to change the model variant (`HF_MODEL_NAME`) or other options.
-
-### Environment variables
+## Environment Variables
 
 | Variable | Default | Description |
 |:---|:---|:---|
-| `HF_MODEL_NAME` | `lingbot-map` | Model variant to download (`lingbot-map`, `lingbot-map-long`, `lingbot-map-stage1`) |
-| `MODEL_PATH` | *(auto)* | Full path to a pre-downloaded `.pt` file inside the container |
-| `MODEL_CACHE_DIR` | `/model` | Where the model is stored/cached |
-| `HUGGING_FACE_HUB_TOKEN` | *(none)* | HuggingFace token if needed |
+| `HF_MODEL_NAME` | `lingbot-map` | Checkpoint to download: `lingbot-map`, `lingbot-map-long`, or `lingbot-map-stage1` |
+| `MODEL_PATH` | *(auto)* | Explicit path to a `.pt` file inside the container (skips auto-download) |
+| `MODEL_CACHE_DIR` | `/model` | Directory where the downloaded model is stored |
+| `HUGGING_FACE_HUB_TOKEN` | *(none)* | HuggingFace token for gated repos |
 
-### Use a pre-downloaded model
+## Tips
 
+**Use a pre-downloaded model** (avoids HuggingFace download at runtime):
 ```bash
 docker run --gpus all \
   -v /path/to/checkpoint.pt:/model/lingbot-map.pt \
@@ -277,6 +333,22 @@ docker run --gpus all \
   -p 8080:8080 \
   lingbot-map-demo \
   --image_folder /data/images
+```
+
+**Limited GPU memory** — add one or both flags:
+```bash
+  --num_scale_frames 2      # reduces activation peak of the initial scale phase
+  --keyframe_interval 6     # keeps only every 6th frame in KV cache
+```
+
+**Long sequences (> 3000 frames)** — use windowed mode:
+```bash
+  --mode windowed --window_size 128
+```
+
+**Faster inference** — reduce camera head iterations (small accuracy trade-off):
+```bash
+  --camera_num_iterations 1
 ```
 
 ---
