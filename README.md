@@ -118,6 +118,17 @@ python demo.py --model_path /path/to/checkpoint.pt \
     --image_folder /path/to/images/
 ```
 
+You can also load a checkpoint directly from Hugging Face. The checkpoint is
+downloaded once and reused from the local Hugging Face cache on later runs.
+
+```bash
+python demo.py -hf robbyant/lingbot-map \
+    --image_folder /path/to/images/
+```
+
+If a repository contains multiple checkpoint files, pass `--hf_file <filename>`
+to select the one to load.
+
 ### Streaming Inference from Video
 
 ```bash
