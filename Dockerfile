@@ -1,14 +1,13 @@
-FROM nvidia/cuda:12.8.0-cudnn9-devel-ubuntu22.04
+# pytorch/pytorch images ship with Python, pip, and PyTorch pre-installed,
+# so no NVIDIA registry auth or manual CUDA installation is needed.
+FROM pytorch/pytorch:2.9.1-cuda12.8-cudnn9-devel
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 ENV PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-# System dependencies
+# System dependencies (Python/pip already present in base image)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.10 \
-    python3.10-dev \
-    python3-pip \
     git \
     wget \
     curl \
@@ -18,14 +17,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxrender-dev \
     libgomp1 \
     && rm -rf /var/lib/apt/lists/*
-
-RUN ln -sf /usr/bin/python3.10 /usr/bin/python && \
-    ln -sf /usr/bin/pip3 /usr/bin/pip
-
-# PyTorch 2.9.1 + CUDA 12.8
-RUN pip install --no-cache-dir \
-    torch==2.9.1 torchvision==0.24.1 \
-    --index-url https://download.pytorch.org/whl/cu128
 
 # Copy source and install lingbot-map with visualization extras
 WORKDIR /app
