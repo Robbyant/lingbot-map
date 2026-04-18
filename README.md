@@ -208,6 +208,79 @@ python demo.py --model_path /path/to/checkpoint.pt \
 
 `--camera_num_iterations` defaults to `4`; setting it to `1` skips three refinement passes in the camera head (and shrinks its KV cache by 4×).
 
+# 🐳 Docker Quick Start
+
+Run the demo on your own images without a local Python environment.
+
+### Prerequisites
+- [Docker](https://docs.docker.com/get-docker/) with [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)
+- An NVIDIA GPU with CUDA 12.8 support
+
+### 1. Build the image
+
+```bash
+docker build -t lingbot-map-demo .
+```
+
+### 2. Run with your images
+
+Place your images in a local `images/` folder, then:
+
+```bash
+docker run --gpus all \
+  -v $(pwd)/images:/data/images \
+  -v $(pwd)/model:/model \
+  -p 8080:8080 \
+  lingbot-map-demo \
+  --image_folder /data/images
+```
+
+Open **http://localhost:8080** in your browser to see the interactive 3D viewer.
+
+The model is **downloaded automatically** on the first run and cached in `./model/`.
+
+### Run with a video file
+
+```bash
+docker run --gpus all \
+  -v /path/to/video.mp4:/data/video.mp4 \
+  -v $(pwd)/model:/model \
+  -p 8080:8080 \
+  lingbot-map-demo \
+  --video_path /data/video.mp4 --fps 10
+```
+
+### Using docker-compose
+
+```bash
+# Put your images in ./images/, then:
+docker compose up
+```
+
+Edit `docker-compose.yml` to change the model variant (`HF_MODEL_NAME`) or other options.
+
+### Environment variables
+
+| Variable | Default | Description |
+|:---|:---|:---|
+| `HF_MODEL_NAME` | `lingbot-map` | Model variant to download (`lingbot-map`, `lingbot-map-long`, `lingbot-map-stage1`) |
+| `MODEL_PATH` | *(auto)* | Full path to a pre-downloaded `.pt` file inside the container |
+| `MODEL_CACHE_DIR` | `/model` | Where the model is stored/cached |
+| `HUGGING_FACE_HUB_TOKEN` | *(none)* | HuggingFace token if needed |
+
+### Use a pre-downloaded model
+
+```bash
+docker run --gpus all \
+  -v /path/to/checkpoint.pt:/model/lingbot-map.pt \
+  -v $(pwd)/images:/data/images \
+  -p 8080:8080 \
+  lingbot-map-demo \
+  --image_folder /data/images
+```
+
+---
+
 # 📜 License
 
 This project is released under the Apache License 2.0. See [LICENSE](LICENSE.txt) file for details.

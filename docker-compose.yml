@@ -1,0 +1,24 @@
+services:
+  lingbot-map:
+    build: .
+    image: lingbot-map-demo
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      # Set to lingbot-map-long for long sequences, lingbot-map-stage1 for bidirectional
+      - HF_MODEL_NAME=lingbot-map
+      # Optional: set to a .pt path inside the container to skip auto-download
+      # - MODEL_PATH=/model/lingbot-map.pt
+      # Optional: HuggingFace token for private/gated repos
+      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN:-}
+    volumes:
+      # Mount your images here
+      - ./images:/data/images
+      # Model cache (downloaded on first run, reused afterwards)
+      - ./model:/model
+    ports:
+      - "8080:8080"
+    # Default: run on the mounted images folder
+    command: --image_folder /data/images
+    # Uncomment to run on a video file (also mount the file above):
+    # command: --video_path /data/video.mp4 --fps 10
