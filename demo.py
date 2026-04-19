@@ -127,6 +127,8 @@ def load_model(args, device):
 
     if args.model_path:
         print(f"Loading checkpoint: {args.model_path}")
+        # Note: weights_only=False is used here for backward compatibility with existing checkpoints.
+        # Users should only load checkpoints from trusted sources (official releases).
         ckpt = torch.load(args.model_path, map_location=device, weights_only=False)
         state_dict = ckpt.get("model", ckpt)
         missing, unexpected = model.load_state_dict(state_dict, strict=False)

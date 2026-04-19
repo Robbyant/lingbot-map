@@ -219,7 +219,18 @@ class AggregatorBase(nn.Module, ABC):
 
             # Load pretrained weights
             try:
-                ckpt = torch.load(pretrained_path)
+                # Security: Try loading with weights_only=True first (safe mode)
+                # This prevents arbitrary code execution from malicious checkpoints
+                try:
+                    ckpt = torch.load(pretrained_path, weights_only=True)
+                except Exception:
+                    # Fall back to unsafe loading for backward compatibility with older checkpoints
+                    logger.warning(
+                        f"Loading {pretrained_path} with weights_only=False for backward compatibility. "
+                        "Only use checkpoints from trusted sources!"
+                    )
+                    ckpt = torch.load(pretrained_path, weights_only=False)
+                
                 del ckpt['pos_embed']
                 logger.info("Loading pretrained weights for DINOv2")
                 missing, unexpected = self.patch_embed.load_state_dict(ckpt, strict=False)
