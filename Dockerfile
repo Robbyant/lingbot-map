@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     curl \
     libglib2.0-0 \
+    libgl1 \
     libsm6 \
     libxext6 \
     libxrender-dev \
