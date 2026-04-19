@@ -4,7 +4,7 @@ FROM pytorch/pytorch:2.9.1-cuda12.8-cudnn9-devel
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
-ENV PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+ENV PYTORCH_ALLOC_CONF=expandable_segments:True
 
 # System dependencies (Python/pip already present in base image)
 RUN apt-get update && apt-get install -y --no-install-recommends \
