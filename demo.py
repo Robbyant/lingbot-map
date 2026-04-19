@@ -127,9 +127,7 @@ def load_model(args, device):
 
     if args.model_path:
         print(f"Loading checkpoint: {args.model_path}")
-        # Always load to CPU first; moving a fp32 state dict directly to the
-        # target GPU risks OOM on cards with limited VRAM (e.g. 6 GB).
-        ckpt = torch.load(args.model_path, map_location="cpu", weights_only=False)
+        ckpt = torch.load(args.model_path, map_location=device, weights_only=False)
         state_dict = ckpt.get("model", ckpt)
         missing, unexpected = model.load_state_dict(state_dict, strict=False)
         if missing:
@@ -137,16 +135,6 @@ def load_model(args, device):
         if unexpected:
             print(f"  Unexpected keys: {len(unexpected)}")
         print("  Checkpoint loaded.")
-
-    # Cast the aggregator (DINOv2 trunk) to bfloat16 on CPU before the GPU
-    # transfer. This halves the trunk's VRAM footprint (~2-3 GB saved) and
-    # avoids OOM on GPUs with ≤8 GB. Heads are kept in fp32 as the original
-    # code documents. The matching cast in main() becomes a no-op.
-    if device.type == "cuda" and getattr(model, "aggregator", None) is not None:
-        cap = torch.cuda.get_device_capability(device)
-        dtype = torch.bfloat16 if cap[0] >= 8 else torch.float16
-        print(f"Pre-casting aggregator to {dtype} on CPU before GPU transfer")
-        model.aggregator = model.aggregator.to(dtype=dtype)
 
     return model.to(device).eval()
 
