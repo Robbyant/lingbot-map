@@ -6,6 +6,13 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 ENV PYTORCH_ALLOC_CONF=expandable_segments:True
 
+# LOW_VRAM_MODE=1: cast aggregator to bf16 on CPU before GPU transfer (~2-3 GB VRAM savings).
+# Per original authors: "no measurable quality change" for the aggregator trunk,
+# but the scale-phase RoPE computations are affected on very small GPUs.
+# Build with: docker build --build-arg LOW_VRAM_MODE=1 -t lingbot-map-demo-light .
+ARG LOW_VRAM_MODE=0
+ENV LOW_VRAM_MODE=${LOW_VRAM_MODE}
+
 # System dependencies (Python/pip already present in base image)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \

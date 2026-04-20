@@ -136,16 +136,11 @@ def load_model(args, device):
             print(f"  Unexpected keys: {len(unexpected)}")
         print("  Checkpoint loaded.")
 
-    # Cast aggregator to bfloat16 on CPU before GPU transfer.
-    # The aggregator (DINOv2 trunk) is the bulk of the model (~2-3 GB in fp32).
-    # Casting on CPU avoids needing a temporary fp32+bf16 copy on GPU,
-    # which would OOM on cards with <=6 GB VRAM.
-    # Per the original authors: "no measurable quality change".
-    # To revert: remove this block and checkout the parent branch.
-    if device.type == "cuda" and getattr(model, "aggregator", None) is not None:
+    if os.environ.get("LOW_VRAM_MODE", "0") == "1" and \
+            device.type == "cuda" and getattr(model, "aggregator", None) is not None:
         cap = torch.cuda.get_device_capability(device)
         dtype = torch.bfloat16 if cap[0] >= 8 else torch.float16
-        print(f"Casting aggregator to {dtype} on CPU before GPU transfer (low-VRAM mode)")
+        print(f"[LOW_VRAM_MODE] Casting aggregator to {dtype} on CPU before GPU transfer")
         model.aggregator = model.aggregator.to(dtype=dtype)
 
     return model.to(device).eval()
