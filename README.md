@@ -125,6 +125,18 @@ python demo.py --model_path /path/to/checkpoint.pt \
     --video_path video.mp4 --fps 10
 ```
 
+### Webcam Capture
+
+The webcam mode records a short sequence from the local camera, saves the
+frames under `captures/`, then runs the normal image-sequence reconstruction.
+Move the camera slowly sideways or around the object so the model gets
+parallax; rotating in place gives much weaker geometry.
+
+```bash
+python demo.py --model_path /path/to/checkpoint.pt \
+    --webcam --capture_frames 36 --capture_fps 3
+```
+
 ### Streaming with Keyframe Interval
 
 Use `--keyframe_interval` to reduce KV cache memory by only keeping every N-th frame as a keyframe. Non-keyframe frames still produce predictions but are not stored in the cache. This is useful for long sequences which exceed 320 frames (We train with video RoPE on 320 views, so performance degrades when the KV cache stores more than 320 views. Using a keyframe strategy allows inference over longer sequences.).
