@@ -415,8 +415,8 @@ class PointCloudViewer:
             "Show Camera", initial_value=self.show_camera
         )
         self.vis_threshold_slider = self.server.gui.add_slider(
-            "Visibility Threshold", min=1.0, max=5.0, step=0.01,
-            initial_value=self.vis_threshold,
+            "Visibility Threshold", min=0.0, max=5.0, step=0.01,
+            initial_value=max(self.vis_threshold, 0.0),
         )
         self.camera_downsample_slider = self.server.gui.add_slider(
             "Camera Downsample Factor", min=1, max=50, step=1, initial_value=1
