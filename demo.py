@@ -259,9 +259,15 @@ def export_results(predictions, images_cpu, output_dir, conf_threshold=0.0):
         elif isinstance(v, np.ndarray):
             save_dict[k] = v
     if isinstance(images_cpu, torch.Tensor):
-        save_dict["images"] = images_cpu.numpy()
+        images_arr = images_cpu.numpy()
     elif isinstance(images_cpu, np.ndarray):
-        save_dict["images"] = images_cpu
+        images_arr = images_cpu
+    else:
+        images_arr = None
+    if images_arr is not None:
+        if images_arr.ndim == 5 and images_arr.shape[0] == 1:
+            images_arr = images_arr[0]  # (1,S,C,H,W) → (S,C,H,W)
+        save_dict["images"] = images_arr
     np.savez_compressed(npz_path, **save_dict)
     print(f"  Saved predictions → {npz_path}")
 
