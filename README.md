@@ -97,10 +97,8 @@ We provide four example scenes in `example/` that you can run out of the box:
 python demo.py --model_path /path/to/lingbot-map-long.pt \
     --image_folder example/church --mask_sky
 ```
-<img width="200" height="113" alt="output_pointcloud_original" src="https://github.com/user-attachments/assets/627fb738-03b0-4597-a7f8-fbc62cc296dc" />
+<img width="780" height="240" alt="output_pointcloud_side_by_side" src="https://github.com/user-attachments/assets/e43fc924-b8a6-43cf-aedd-13bb915c1d2d" />
 
-
-<img width="480" height="325" alt="output_pointcloud_cropped" src="https://github.com/user-attachments/assets/f34b2bc8-ef4a-4cdf-8049-5c01b7883562" />
 
 
 ```bash
@@ -108,8 +106,8 @@ python demo.py --model_path /path/to/lingbot-map-long.pt \
 python demo.py --model_path /path/to/lingbot-map-long.pt \
     --image_folder example/university --mask_sky
 ```
-<img width="200" height="113" alt="output_pointcloud_original" src="https://github.com/user-attachments/assets/e501fcb4-6da1-4919-8a73-0239d64457cd" />
-<img width="416" height="442" alt="output_pointcloud_cropped" src="https://github.com/user-attachments/assets/c495a719-d22d-42a4-8f79-fab312f91a5e" />
+<img width="652" height="240" alt="output_pointcloud_side_by_side" src="https://github.com/user-attachments/assets/363322d8-1766-48b2-b305-f2c0adbfcc84" />
+
 
 
 
@@ -118,6 +116,7 @@ python demo.py --model_path /path/to/lingbot-map-long.pt \
 python demo.py --model_path /path/to/lingbot-map-long.pt \
     --image_folder example/loop
 ```
+<img width="714" height="320" alt="output_pointcloud_side_by_side" src="https://github.com/user-attachments/assets/7cd9e1a0-14bb-41a0-9ce0-fa0890cdf6bb" />
 
 
 ```bash
@@ -125,9 +124,8 @@ python demo.py --model_path /path/to/lingbot-map-long.pt \
 python demo.py --model_path /path/to/lingbot-map-long.pt \
     --image_folder example/oxford --mask_sky
 ```
+<img width="608" height="240" alt="output_pointcloud_side_by_side" src="https://github.com/user-attachments/assets/7be7c5b6-fd32-472b-91ad-570ca578afa8" />
 
-<img width="200" height="113" alt="output_pointcloud_original" src="https://github.com/user-attachments/assets/a3ead57d-fe56-4ca9-9fa0-ae0e6dbc23f7" />
-<img width="346" height="326" alt="output_pointcloud_cropped" src="https://github.com/user-attachments/assets/ae1eda30-70d6-4be6-87d1-b3206bee936c" />
 
 
 We will provide more examples in the follow-up.
@@ -147,8 +145,8 @@ python demo.py \
     --camera_num_iterations 4 \
     --keyframe_interval 2
 ```
-<img width="200" height="113" alt="output_pointcloud_original" src="https://github.com/user-attachments/assets/9670c821-09bf-45c5-9f1a-11d913b4a033" />
-<img width="480" height="506" alt="output_pointcloud_cropped" src="https://github.com/user-attachments/assets/2d224204-1898-4d0d-b4f8-b8ae830e1d6c" />
+<img width="600" height="220" alt="output_pointcloud_side_by_side" src="https://github.com/user-attachments/assets/2adb96aa-bed5-4b7b-97d1-763e2e52842c" />
+
 
 
 ### Windowed Inference (for long sequences, >3000 frames)
