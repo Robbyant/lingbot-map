@@ -3,12 +3,12 @@ services:
     build:
       context: .
       args:
-        LOW_VRAM_MODE: "0"
-    image: lingbot-map-demo
+        LOW_VRAM_MODE: "1"               # cast aggregator to bf16 before GPU transfer
+    image: lingbot-map-demo-light
     runtime: nvidia
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
-      - HF_MODEL_NAME=lingbot-map        # lingbot-map | lingbot-map-long | lingbot-map-stage1
+      - HF_MODEL_NAME=lingbot-map
       - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN:-}
     volumes:
       - ./images:/data/images            # input images
@@ -19,3 +19,9 @@ services:
     command: >
       --image_folder /data/images
       --output_dir /data/output
+      --mode windowed
+      --window_size 16
+      --overlap_size 4
+      --num_scale_frames 2
+      --conf_threshold 0.0
+      --point_size 0.001

@@ -20,7 +20,9 @@ Usage:
 
 import argparse
 import glob
+import json
 import os
+import struct
 import time
 
 # Must be set before `import torch` / any CUDA init. Reduces the reserved-vs-allocated
@@ -235,6 +237,100 @@ def prepare_for_visualization(predictions, images=None):
 
 
 # =============================================================================
+# Export
+# =============================================================================
+
+def export_results(predictions, images_cpu, output_dir, conf_threshold=0.0):
+    """Save inference results to output_dir.
+
+    Writes three files:
+      predictions.npz  – raw numpy arrays (depth, world_points, extrinsic, intrinsic, images)
+      pointcloud.ply   – merged, confidence-filtered point cloud (binary PLY)
+      cameras.json     – per-frame camera-to-world poses and intrinsics
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    # ── NPZ ──────────────────────────────────────────────────────────────────
+    npz_path = os.path.join(output_dir, "predictions.npz")
+    save_dict = {}
+    for k, v in predictions.items():
+        if isinstance(v, torch.Tensor):
+            save_dict[k] = v.cpu().numpy()
+        elif isinstance(v, np.ndarray):
+            save_dict[k] = v
+    if isinstance(images_cpu, torch.Tensor):
+        save_dict["images"] = images_cpu.numpy()
+    elif isinstance(images_cpu, np.ndarray):
+        save_dict["images"] = images_cpu
+    np.savez_compressed(npz_path, **save_dict)
+    print(f"  Saved predictions → {npz_path}")
+
+    # ── PLY ──────────────────────────────────────────────────────────────────
+    world_points = save_dict.get("world_points")   # (S, H, W, 3)
+    depth        = save_dict.get("depth")          # (S, H, W, 1) fallback
+    depth_conf   = save_dict.get("depth_conf")     # (S, H, W)
+    images_np    = save_dict.get("images")         # (S, 3, H, W)
+
+    if world_points is None and depth is not None:
+        from lingbot_map.utils.geometry import unproject_depth_map_to_point_map
+        world_points = unproject_depth_map_to_point_map(
+            depth, save_dict["extrinsic"], save_dict["intrinsic"]
+        )
+
+    if world_points is not None and images_np is not None:
+        S, H, W = world_points.shape[:3]
+        colors = images_np.transpose(0, 2, 3, 1)  # (S, H, W, 3)
+        pts_all, col_all = [], []
+        for i in range(S):
+            pts = world_points[i].reshape(-1, 3)
+            col = (colors[i].reshape(-1, 3) * 255).clip(0, 255).astype(np.uint8)
+            valid = np.isfinite(pts).all(axis=1)
+            if depth_conf is not None:
+                valid &= depth_conf[i].reshape(-1) > conf_threshold
+            pts_all.append(pts[valid])
+            col_all.append(col[valid])
+        pts_merged = np.concatenate(pts_all, axis=0).astype(np.float32)
+        col_merged = np.concatenate(col_all, axis=0)
+        n = len(pts_merged)
+
+        ply_path = os.path.join(output_dir, "pointcloud.ply")
+        header = (
+            "ply\nformat binary_little_endian 1.0\n"
+            f"element vertex {n}\n"
+            "property float x\nproperty float y\nproperty float z\n"
+            "property uchar red\nproperty uchar green\nproperty uchar blue\n"
+            "end_header\n"
+        ).encode()
+        with open(ply_path, "wb") as f:
+            f.write(header)
+            # interleave xyz + rgb tightly
+            data = np.empty(n, dtype=[("x","f4"),("y","f4"),("z","f4"),
+                                      ("r","u1"),("g","u1"),("b","u1")])
+            data["x"], data["y"], data["z"] = pts_merged[:,0], pts_merged[:,1], pts_merged[:,2]
+            data["r"], data["g"], data["b"] = col_merged[:,0], col_merged[:,1], col_merged[:,2]
+            f.write(data.tobytes())
+        print(f"  Saved point cloud ({n:,} pts) → {ply_path}")
+    else:
+        print("  Skipping PLY export (world_points or images not available)")
+
+    # ── cameras.json ─────────────────────────────────────────────────────────
+    extrinsic  = save_dict.get("extrinsic")   # (S, 3, 4)  c2w
+    intrinsic  = save_dict.get("intrinsic")   # (S, 3, 3)
+    if extrinsic is not None and intrinsic is not None:
+        cameras = []
+        for i in range(len(extrinsic)):
+            cameras.append({
+                "frame": i,
+                "c2w":  extrinsic[i].tolist(),
+                "K":    intrinsic[i].tolist(),
+            })
+        cam_path = os.path.join(output_dir, "cameras.json")
+        with open(cam_path, "w") as f:
+            json.dump(cameras, f, indent=2)
+        print(f"  Saved cameras ({len(cameras)} frames) → {cam_path}")
+
+
+# =============================================================================
 # Main
 # =============================================================================
 
@@ -297,6 +393,12 @@ def main():
                         help="Save sky mask visualizations (original | mask | overlay) to this directory")
     parser.add_argument("--export_preprocessed", type=str, default=None,
                         help="Export stride-sampled, resized/cropped images to this folder")
+
+    # Output
+    parser.add_argument("--output_dir", type=str, default="/data/output",
+                        help="Directory for exported results (predictions.npz, pointcloud.ply, cameras.json)")
+    parser.add_argument("--no_viewer", action="store_true",
+                        help="Skip the interactive viewer (export only)")
 
     args = parser.parse_args()
     assert args.image_folder or args.video_path, \
@@ -404,6 +506,14 @@ def main():
         images_for_post = images
 
     predictions, images_cpu = postprocess(predictions, images_for_post)
+
+    # ── Export ───────────────────────────────────────────────────────────────
+    print(f"Exporting results to {args.output_dir} ...")
+    export_results(predictions, images_cpu, args.output_dir, conf_threshold=args.conf_threshold)
+
+    if args.no_viewer:
+        print("Viewer skipped (--no_viewer). Done.")
+        return
 
     # ── Visualize ────────────────────────────────────────────────────────────
     try:
