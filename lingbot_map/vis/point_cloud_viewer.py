@@ -213,6 +213,17 @@ class PointCloudViewer:
         if depth_stride > 1:
             print(f'  depth_stride={depth_stride}: projecting {S - skipped}/{S} frames, skipping {skipped}')
 
+        # Debug: report data validity
+        sample_pts = world_points.reshape(-1, 3)
+        finite_mask = np.isfinite(sample_pts).all(axis=1)
+        finite_ratio = finite_mask.mean()
+        if conf is not None:
+            conf_vals = conf[finite_mask.reshape(conf.shape)] if conf.shape == finite_mask.reshape(conf.shape).shape else conf.reshape(-1)
+            print(f"[vis debug] world_points finite={finite_ratio:.1%}  "
+                  f"conf min={conf.min():.3f} mean={conf.mean():.3f} max={conf.max():.3f}")
+        else:
+            print(f"[vis debug] world_points finite={finite_ratio:.1%}  conf=None (all set to 1.0)")
+
         # Create camera dictionary (all frames keep cameras)
         cam_to_world_mat = closed_form_inverse_se3(extrinsics_cam)
         cam_dict = {
