@@ -97,7 +97,7 @@ class PointCloudViewer:
         self.size = size
         self.state_args = state_args
         self.server = viser.ViserServer(host="0.0.0.0", port=port)
-        self.server.gui.configure_theme(titlebar_content=None, control_layout="collapsible")
+        self.server.gui.configure_theme(titlebar_content=None, control_layout="fixed")
         self.device = device
         self.conf_list = conf_list
         self.vis_threshold = vis_threshold
