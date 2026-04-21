@@ -11,11 +11,11 @@ services:
       - HF_MODEL_NAME=lingbot-map        # lingbot-map | lingbot-map-long | lingbot-map-stage1
       - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN:-}
     volumes:
-      - ${IMAGE_HOST_PATH:-./images}:/data/images   # override: IMAGE_HOST_PATH=~/photos docker compose up
-      - ./model:/model                              # model cache (downloaded on first run)
-      - ./output:/data/output                       # exported results (PLY / NPZ / JSON)
+      - ${IMAGE_HOST_PATH:-./example/oxford}:/data/images   # override: IMAGE_HOST_PATH=~/photos docker compose up
+      - ./model:/model                                      # model cache (downloaded on first run)
+      - ./output:/data/output                               # exported results (PLY / NPZ / JSON)
     ports:
       - "8080:8080"
     command: >
-      --image_folder ${IMAGE_FOLDER:-/data/images}
+      --image_folder /data/images
       --output_dir /data/output
