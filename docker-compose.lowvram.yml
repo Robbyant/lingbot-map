@@ -23,5 +23,5 @@ services:
       --window_size 16
       --overlap_size 4
       --num_scale_frames 2
-      --conf_threshold 0.0
+      --conf_threshold 2.0
       --point_size 0.001
