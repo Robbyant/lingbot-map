@@ -24,4 +24,5 @@ services:
       --overlap_size 4
       --num_scale_frames 2
       --conf_threshold 2.0
-      --point_size 0.001
+      --downsample_factor 4
+      --point_size 0.005
