@@ -1,0 +1,29 @@
+services:
+  lingbot-map:
+    build:
+      context: .
+      args:
+        LOW_VRAM_MODE: "1"               # cast aggregator to bf16 before GPU transfer
+    image: lingbot-map-demo-light
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - HF_MODEL_NAME=lingbot-map
+      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN:-}
+    volumes:
+      - ${IMAGE_HOST_PATH:-./example/oxford}:/data/images   # override: IMAGE_HOST_PATH=~/photos docker compose up
+      - ./model:/model                                      # model cache (downloaded on first run)
+      - ./output:/data/output                               # exported results (PLY / NPZ / JSON)
+    ports:
+      - "8080:8080"
+    command: >
+      --image_folder /data/images
+      --output_dir /data/output
+      --mode windowed
+      --window_size 16
+      --overlap_size 8
+      --num_scale_frames 4
+      --conf_threshold 2.0
+      --downsample_factor 4
+      --mask_sky
+      --point_size 0.005

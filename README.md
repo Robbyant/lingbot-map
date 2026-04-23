@@ -248,6 +248,151 @@ python demo.py --model_path /path/to/checkpoint.pt \
 
 `--camera_num_iterations` defaults to `4`; setting it to `1` skips three refinement passes in the camera head (and shrinks its KV cache by 4×).
 
+# 🐳 Docker
+
+Run the full demo — including model download, inference, and 3D viewer — without any local Python or CUDA setup.
+
+## Image Design
+
+| Layer | Detail |
+|:---|:---|
+| Base image | `pytorch/pytorch:2.9.1-cuda12.8-cudnn9-devel` (public, no auth required) |
+| Attention backend | [FlashInfer](https://github.com/flashinfer-ai/flashinfer) for paged KV-cache; auto-falls back to PyTorch SDPA if unavailable |
+| Visualisation | [viser](https://github.com/nerfstudio-project/viser) web viewer exposed on port **8080** |
+| Model resolution | `docker/entrypoint.sh` checks `/model/` at startup and auto-downloads from HuggingFace when no `.pt` file is found |
+| Data access | Images and model weights are provided via **volume mounts** — nothing user-specific is baked into the image |
+
+```
+lingbot-map-demo
+├── /app/              ← source code + built-in example scenes
+│   └── example/{church,oxford,university,loop}/
+├── /model/            ← mount a host directory here to cache the model
+└── /data/             ← mount your images or video here
+```
+
+## Prerequisites
+
+- [Docker](https://docs.docker.com/get-docker/) with the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)
+- An NVIDIA GPU (CUDA 12.8 driver)
+
+## Build
+
+```bash
+git clone https://github.com/YoshiRi/lingbot-map-docker.git
+cd lingbot-map-docker
+docker build -t lingbot-map-demo .
+```
+
+## Try the Built-in Example Scenes
+
+The four example scenes from `example/` are already baked into the image at `/app/example/`.
+No extra data mount is needed — just provide a writable directory for the model cache.
+
+```bash
+# Church (outdoor, sky masking recommended)
+docker run --gpus all \
+  -v $(pwd)/model:/model \
+  -p 8080:8080 \
+  lingbot-map-demo \
+  --image_folder /app/example/church --mask_sky
+
+# Oxford
+docker run --gpus all \
+  -v $(pwd)/model:/model \
+  -p 8080:8080 \
+  lingbot-map-demo \
+  --image_folder /app/example/oxford --mask_sky
+
+# University
+docker run --gpus all \
+  -v $(pwd)/model:/model \
+  -p 8080:8080 \
+  lingbot-map-demo \
+  --image_folder /app/example/university --mask_sky
+
+# Loop (loop-closure trajectory, no sky masking needed)
+docker run --gpus all \
+  -v $(pwd)/model:/model \
+  -p 8080:8080 \
+  lingbot-map-demo \
+  --image_folder /app/example/loop
+```
+
+On **first run** the model is downloaded from HuggingFace and cached in `./model/`; subsequent runs start immediately.
+Open **http://localhost:8080** in your browser once inference completes.
+
+## Run with Your Own Images
+
+Place your images (`.jpg` / `.png`) in a local folder, then mount it:
+
+```bash
+docker run --gpus all \
+  -v /path/to/your/images:/data/images \
+  -v $(pwd)/model:/model \
+  -p 8080:8080 \
+  lingbot-map-demo \
+  --image_folder /data/images
+```
+
+## Run with a Video File
+
+```bash
+docker run --gpus all \
+  -v /path/to/video.mp4:/data/video.mp4 \
+  -v $(pwd)/model:/model \
+  -p 8080:8080 \
+  lingbot-map-demo \
+  --video_path /data/video.mp4 --fps 10
+```
+
+## docker-compose
+
+Edit `docker-compose.yml` to set your image folder and model variant, then:
+
+```bash
+# Put your images in ./images/
+docker compose up
+```
+
+## Environment Variables
+
+| Variable | Default | Description |
+|:---|:---|:---|
+| `HF_MODEL_NAME` | `lingbot-map` | Checkpoint to download: `lingbot-map`, `lingbot-map-long`, or `lingbot-map-stage1` |
+| `MODEL_PATH` | *(auto)* | Explicit path to a `.pt` file inside the container (skips auto-download) |
+| `MODEL_CACHE_DIR` | `/model` | Directory where the downloaded model is stored |
+| `HUGGING_FACE_HUB_TOKEN` | *(none)* | HuggingFace token for gated repos |
+
+## Tips
+
+**Use a pre-downloaded model** (avoids HuggingFace download at runtime):
+```bash
+docker run --gpus all \
+  -v /path/to/checkpoint.pt:/model/lingbot-map.pt \
+  -v $(pwd)/images:/data/images \
+  -p 8080:8080 \
+  lingbot-map-demo \
+  --image_folder /data/images
+```
+
+**Limited GPU memory** — add one or both flags:
+```bash
+  --num_scale_frames 2      # reduces activation peak of the initial scale phase
+  --keyframe_interval 6     # keeps only every 6th frame in KV cache
+```
+
+**Long sequences (> 3000 frames)** — use windowed mode:
+```bash
+  --mode windowed --window_size 128
+```
+
+**Faster inference** — reduce camera head iterations (small accuracy trade-off):
+```bash
+  --camera_num_iterations 1
+```
+
+---
+
 # 📜 License
 
 This project is released under the Apache License 2.0. See [LICENSE](LICENSE.txt) file for details.
