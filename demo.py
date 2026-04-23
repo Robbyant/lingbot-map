@@ -240,7 +240,7 @@ def prepare_for_visualization(predictions, images=None):
 # Export
 # =============================================================================
 
-def export_results(predictions, images_cpu, output_dir, conf_threshold=0.0):
+def export_results(predictions, images_cpu, output_dir, conf_threshold=0.0, ply_stride=1):
     """Save inference results to output_dir.
 
     Writes three files:
@@ -287,12 +287,13 @@ def export_results(predictions, images_cpu, output_dir, conf_threshold=0.0):
         S, H, W = world_points.shape[:3]
         colors = images_np.transpose(0, 2, 3, 1)  # (S, H, W, 3)
         pts_all, col_all = [], []
+        st = max(1, int(ply_stride))
         for i in range(S):
-            pts = world_points[i].reshape(-1, 3)
-            col = (colors[i].reshape(-1, 3) * 255).clip(0, 255).astype(np.uint8)
+            pts = world_points[i, ::st, ::st].reshape(-1, 3)
+            col = (colors[i, ::st, ::st].reshape(-1, 3) * 255).clip(0, 255).astype(np.uint8)
             valid = np.isfinite(pts).all(axis=1)
             if depth_conf is not None:
-                valid &= depth_conf[i].reshape(-1) > conf_threshold
+                valid &= depth_conf[i, ::st, ::st].reshape(-1) > conf_threshold
             pts_all.append(pts[valid])
             col_all.append(col[valid])
         pts_merged = np.concatenate(pts_all, axis=0).astype(np.float32)
@@ -515,7 +516,8 @@ def main():
 
     # ── Export ───────────────────────────────────────────────────────────────
     print(f"Exporting results to {args.output_dir} ...")
-    export_results(predictions, images_cpu, args.output_dir, conf_threshold=args.conf_threshold)
+    export_results(predictions, images_cpu, args.output_dir,
+                   conf_threshold=args.conf_threshold, ply_stride=args.downsample_factor)
 
     if args.no_viewer:
         print("Viewer skipped (--no_viewer). Done.")

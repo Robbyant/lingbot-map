@@ -21,8 +21,9 @@ services:
       --output_dir /data/output
       --mode windowed
       --window_size 16
-      --overlap_size 4
-      --num_scale_frames 2
+      --overlap_size 8
+      --num_scale_frames 4
       --conf_threshold 2.0
       --downsample_factor 4
+      --mask_sky
       --point_size 0.005
