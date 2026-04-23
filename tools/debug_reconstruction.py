@@ -169,10 +169,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("npz", help="Path to predictions.npz")
     parser.add_argument("--frames", nargs="+", type=int, default=None,
-                        help="Frame indices to inspect (default: 0, S//4, S//2, 3*S//4)")
+                        help="Frame indices to inspect (default: evenly spaced 5 frames)")
     parser.add_argument("--conf_threshold", type=float, default=2.0)
     parser.add_argument("--save", default=None,
-                        help="Directory to save per-frame debug figures")
+                        help="Directory to save debug figures")
     args = parser.parse_args()
 
     print(f"Loading {args.npz} ...")
@@ -185,35 +185,81 @@ def main():
     depth_conf   = (d.get("depth_conf") if "depth_conf" in d
                     else d.get("world_points_conf") if "world_points_conf" in d
                     else None)
+    chunk_scales = d["chunk_scales"] if "chunk_scales" in d else None  # (num_windows,)
 
     S = world_points.shape[0]
+
+    # ── Window alignment scales ────────────────────────────────────
+    if chunk_scales is not None:
+        cs = chunk_scales.reshape(-1)
+        print(f"\n=== Window alignment scales (chunk_scales) ===")
+        print(f"  num windows : {len(cs)}")
+        print(f"  values      : {np.array2string(cs, precision=4, separator=', ')}")
+        bad = (cs < 0.01) | (cs > 100)
+        if bad.any():
+            print(f"  WARNING: windows {np.where(bad)[0].tolist()} have extreme scales "
+                  f"(clamped to 1e-3 or 1e3) — alignment failed for these windows")
+        else:
+            print(f"  All scales look reasonable (range [{cs.min():.4f}, {cs.max():.4f}])")
+
+    # ── Full-sequence front% scan ─────────────────────────────────
+    print(f"\n=== Front% scan (every 10th frame) ===")
+    stride = max(1, S // 50)
+    scan_frames = list(range(0, S, stride))
+    front_pcts = []
+    for fi in scan_frames:
+        pts = world_points[fi].reshape(-1, 3)
+        c2w = extrinsic[fi]
+        w2c = c2w_to_w2c(c2w)
+        _, dc = project_to_camera(pts, w2c, intrinsic[fi])
+        finite = np.isfinite(pts).all(axis=1)
+        conf_ok = depth_conf[fi].reshape(-1) > args.conf_threshold if depth_conf is not None else finite
+        valid = finite & conf_ok
+        pct = 100 * (dc[valid] > 0).sum() / max(valid.sum(), 1)
+        front_pcts.append(float(pct))
+
+    front_arr = np.array(front_pcts)
+    bad_frames = [scan_frames[i] for i, p in enumerate(front_pcts) if p < 50]
+    good_frames = [scan_frames[i] for i, p in enumerate(front_pcts) if p >= 90]
+    print(f"  Frames with <50% front (flipped): {bad_frames}")
+    print(f"  Frames with >=90% front (correct): count={len(good_frames)}/{len(scan_frames)}")
+
     frames = args.frames or [0, S // 4, S // 2, 3 * S // 4, S - 1]
     frames = [min(f, S - 1) for f in frames]
-    print(f"Analysing frames: {frames}\n")
+    print(f"\nDetail frames: {frames}")
 
     # ── Per-frame text summary ─────────────────────────────────────
-    print(f"{'frame':>6}  {'front%':>7}  {'behind%':>8}  {'depth_median':>12}  {'cam_pos':>30}")
+    print(f"\n{'frame':>6}  {'front%':>7}  {'behind%':>8}  {'depth_median':>12}  "
+          f"{'cam_pos':>30}  {'cam_fwd':>30}")
     diags = []
     for fi in frames:
         diag = analyze_frame(fi, world_points, extrinsic, intrinsic,
                              images, depth_conf, args.conf_threshold)
         diags.append(diag)
+        fwd = diag["cam_forward"]
         print(f"{fi:6d}  {diag['pct_front']:7.1f}  {diag['pct_behind']:8.1f}  "
               f"{diag['depth_median']:12.3f}  "
-              f"[{diag['cam_pos'][0]:.2f}, {diag['cam_pos'][1]:.2f}, {diag['cam_pos'][2]:.2f}]")
+              f"[{diag['cam_pos'][0]:5.2f},{diag['cam_pos'][1]:5.2f},{diag['cam_pos'][2]:5.2f}]  "
+              f"[{fwd[0]:5.2f},{fwd[1]:5.2f},{fwd[2]:5.2f}]")
 
     # ── Diagnosis ─────────────────────────────────────────────────
     print()
     avg_front = np.mean([d["pct_front"] for d in diags])
+    pct_bad_windows = 100 * len(bad_frames) / max(len(scan_frames), 1)
     if avg_front > 90:
         print("✓ Points are mostly in front of cameras — geometry looks correct.")
         print("  Blank viewer / bad PLY is likely a density/scale issue, not a logic bug.")
-    elif avg_front > 50:
-        print("△ Partial front/behind mix — possible coordinate convention mismatch.")
-        print("  Check if extrinsic is truly c2w (camera-to-world).")
+    elif pct_bad_windows > 10 and chunk_scales is not None and ((chunk_scales.reshape(-1) < 0.01).any()):
+        print("✗ Window scale clamped to minimum — depth-ratio alignment failed.")
+        print("  Likely cause: near-zero or negative depth in overlap frames.")
+        print("  Fix: increase --overlap_size or --num_scale_frames.")
+    elif pct_bad_windows > 10:
+        print("✗ Many frames have points behind cameras.")
+        print("  Pattern: check if bad frames cluster at window boundaries.")
+        print("  If clustered → windowed stitching issue (overlap too small).")
+        print("  If scattered → model output inconsistency (try --mode streaming).")
     else:
-        print("✗ Most points are BEHIND cameras — likely a coordinate convention bug.")
-        print("  The c2w→w2c inversion or world_point projection may be flipped.")
+        print("△ Partial front/behind mix — possible coordinate convention mismatch.")
 
     # ── Figures ───────────────────────────────────────────────────
     n = len(diags)
