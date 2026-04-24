@@ -32,6 +32,11 @@ LingBot-Map has focused on:
 
 ---
 
+# 📰 News
+
+- **2026-04-24** — Fixed a FlashInfer KV cache bug where `--keyframe_interval > 1` silently cached non-keyframes. **You should now see better pose and reconstruction quality when running with `--keyframe_interval > 1`**.
+---
+
 # ⚙️ Quick Start
 
 ## Installation
@@ -46,9 +51,10 @@ conda activate lingbot-map
 **2. Install PyTorch (CUDA 12.8)**
 
 ```bash
-pip install torch==2.9.1 torchvision==0.24.1 --index-url https://download.pytorch.org/whl/cu128
+pip install torch==2.8.0 torchvision==0.23.0 --index-url https://download.pytorch.org/whl/cu128
 ```
 
+> PyTorch 2.8.0 is the recommended version because NVIDIA Kaolin (required by the batch rendering pipeline) has prebuilt wheels for `torch-2.8.0_cu128`. If you only need `demo.py` you may use a newer PyTorch, but the batch renderer then requires building Kaolin from source.
 > For other CUDA versions, see [PyTorch Get Started](https://pytorch.org/get-started/locally/).
 
 **3. Install lingbot-map**
@@ -59,15 +65,15 @@ pip install -e .
 
 **4. Install FlashInfer (recommended)**
 
-FlashInfer provides paged KV cache attention for efficient streaming inference:
+FlashInfer provides paged KV cache attention for efficient streaming inference. It is a pure-Python package that JIT-compiles CUDA kernels on first use, so a single wheel works across CUDA/PyTorch versions:
 
 ```bash
-# CUDA 12.8 + PyTorch 2.9
-pip install flashinfer-python -i https://flashinfer.ai/whl/cu128/torch2.9/
+pip install --index-url https://pypi.org/simple flashinfer-python
 ```
 
-> For other CUDA/PyTorch combinations, see [FlashInfer installation](https://docs.flashinfer.ai/installation.html).
-> If FlashInfer is not installed, the model falls back to SDPA (PyTorch native attention) via `--use_sdpa`.
+> `--index-url https://pypi.org/simple` is only needed if your default pip index is an internal mirror that doesn't have `flashinfer-python`.
+> (Optional) For faster first-use, you can additionally install a CUDA-specific JIT cache: `pip install flashinfer-jit-cache -f https://flashinfer.ai/whl/cu128/flashinfer-jit-cache/`.
+> See [FlashInfer installation](https://docs.flashinfer.ai/installation.html) for details. If FlashInfer is not installed, the model falls back to SDPA (PyTorch native attention) via `--use_sdpa`.
 
 **5. Visualization dependencies (optional)**
 
@@ -247,6 +253,171 @@ python demo.py --model_path /path/to/checkpoint.pt \
 ```
 
 `--camera_num_iterations` defaults to `4`; setting it to `1` skips three refinement passes in the camera head (and shrinks its KV cache by 4×).
+
+# 🎥 Batch Inference & Offline Video Rendering
+
+`demo_render/` produces headless point-cloud flythrough videos from a video or image folder — a two-phase pipeline that shares the same PyTorch / FlashInfer / checkpoint stack as `demo.py`:
+
+```
+Video / Images ──► batch_demo.py (inference) ──► NPZ ──► rgbd_scan_render.py (rendering) ──► MP4
+                   Phase 1: model prediction         Phase 2: point cloud rendering
+```
+
+- **Phase 1** — `batch_demo.py`: run model inference, save per-frame NPZs (depth, poses, images).
+- **Phase 2** — `rgbd_scan_render.py`: build a voxelized point cloud from NPZ, render a camera flythrough with trajectory overlays.
+- **Combined** — `process_videos.sh`: batch-process a folder of videos through both phases, skipping those that already have NPZ output.
+
+## Install (extends the main install)
+
+**1. Rendering Python dependencies**
+
+```bash
+pip install -e ".[vis,render]"
+```
+
+`render` pulls in `open3d>=0.19` and `pyyaml` (the core `numpy<2` constraint comes from the base `lingbot-map` install). Sky masking in this pipeline uses `onnxruntime-gpu` for batched segmentation; install it if you don't already have the CPU `onnxruntime`:
+
+```bash
+pip install onnxruntime-gpu
+```
+
+**2. Kaolin** — matches the PyTorch 2.8.0 + CUDA 12.8 recommended above:
+
+```bash
+pip install --index-url https://pypi.org/simple \
+    kaolin -f https://nvidia-kaolin.s3.us-east-2.amazonaws.com/torch-2.8.0_cu128.html
+```
+
+> `--index-url https://pypi.org/simple` bypasses any internal mirror that might otherwise serve the PyPI placeholder wheel (which raises `ImportError` on import).
+> NVIDIA Kaolin does not publish prebuilt wheels for PyTorch 2.9.x — if you're on 2.9 for other reasons, build Kaolin from source (`pip install --no-build-isolation git+https://github.com/NVIDIAGameWorks/kaolin.git`, needs local CUDA toolkit). For other torch/CUDA combinations see [NVIDIA Kaolin installation](https://kaolin.readthedocs.io/en/latest/notes/installation.html).
+
+**3. ffmpeg**
+
+```bash
+sudo apt install ffmpeg    # or: brew install ffmpeg
+```
+
+**4. CUDA extensions** (required before first run)
+
+```bash
+cd demo_render/render_cuda_ext && python setup.py build_ext --inplace && cd ../..
+```
+
+This builds `voxel_morton_ext` and `frustum_cull_ext` in place — both are imported by `rgbd_render` for GPU voxelization and frustum culling.
+
+## Quick Start
+
+### Single video (both phases)
+
+```bash
+# Phase 1: inference → per-frame NPZ
+CUDA_VISIBLE_DEVICES=0 python demo_render/batch_demo.py \
+    --video_path /path/to/video.mp4 \
+    --output_folder /path/to/output/ \
+    --model_path /path/to/lingbot-map-long.pt \
+    --mode windowed --window_size 64 --fps 20 \
+    --save_predictions --no_render
+
+# Phase 2: NPZ → rendered video
+CUDA_VISIBLE_DEVICES=0 python demo_render/rgbd_scan_render.py \
+    --input_npz /path/to/output/video_name/ \
+    --output_video /path/to/output/video_name.mp4 \
+    --mask_sky --draw_traj --fps 60
+```
+
+### Batch a folder of videos
+
+Edit the config variables at the top of `demo_render/process_videos.sh`, then:
+
+```bash
+bash demo_render/process_videos.sh
+```
+
+Runs Phase 1 on all videos, then Phase 2. Skips videos that already have NPZ output (safe to re-run).
+
+## Phase 1 — `batch_demo.py`
+
+| Mode | Flag | Description |
+|------|------|-------------|
+| **Streaming** | `--mode streaming` | Frame-by-frame with KV cache. Fast, lower memory. |
+| **Windowed** | `--mode windowed` | Sliding window with overlap alignment. Better quality for long sequences. |
+
+Key parameters:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--model_path` | required | Path to model checkpoint |
+| `--video_path` / `--input_folder` | — | Input video, or folder of scene directories |
+| `--fps` / `--target_frames` | — | Extraction rate, or target total frames (auto-computes fps) |
+| `--first_k` / `--image_stride` | — / 1 | Only use first K frames / every N-th frame |
+| `--window_size` | 64 | Frames per window (windowed mode) |
+| `--flow_threshold` | 0.0 | Flow-based keyframe threshold in px; `>0` enables adaptive keyframes |
+| `--max_non_keyframe_gap` | 100 | Max consecutive non-keyframes before forcing one |
+| `--mask_sky` | off | Run sky segmentation during inference |
+| `--compile` | off | `torch.compile` CUDA graph acceleration (FlashInfer backend only) |
+| `--save_predictions` | off | Save per-frame NPZ files |
+| `--no_render` | off | Skip video rendering (inference only) |
+
+Example — long video with flow-based keyframes:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python demo_render/batch_demo.py \
+    --video_path video.mp4 --output_folder outputs/ \
+    --model_path lingbot-map-long.pt \
+    --mode windowed --window_size 320 \
+    --flow_threshold 25.0 --max_non_keyframe_gap 100 \
+    --target_frames 4000 --vis_threshold 2.0 \
+    --mask_sky --save_predictions --no_render
+```
+
+## Phase 2 — `rgbd_scan_render.py`
+
+Configuration is loaded in order **YAML → CLI flags** (CLI wins). Presets live in `demo_render/config/`:
+
+| Preset | Scene Type | Notes |
+|--------|------------|-------|
+| `config/default.yaml` | General | Renders first 200 frames for quick preview |
+| `config/indoor.yaml` | Indoor | Short depth (10m), tighter camera follow |
+| `config/outdoor_large.yaml` | Large outdoor | Sky masking on, coarser voxels, full render |
+
+```bash
+# YAML preset
+python demo_render/rgbd_scan_render.py \
+    --config demo_render/config/indoor.yaml \
+    --input_npz scene_dir/ --output_video output.mp4
+
+# Pure CLI
+python demo_render/rgbd_scan_render.py \
+    --input_npz scene_dir/ --output_video output.mp4 \
+    --voxel_size 0.001 --mask_sky --draw_traj \
+    --back_offset 0.6 --up_offset 0.3 --look_offset 0.3 \
+    --num_workers 16 --fps 60
+```
+
+Each run produces (assuming `--output_video output.mp4`):
+
+| File | Description |
+|------|-------------|
+| `output.mp4` | Rendered point-cloud flythrough |
+| `output_rgb.mp4` | Original RGB frames encoded as video |
+| `output_depth.mp4` | Depth visualization (with `--depth_video`) |
+| `output_config.yaml` | Full config snapshot of this run |
+
+## NPZ Input Format
+
+`--input_npz` accepts either a single `.npz` with all frames stacked (`images (S,H,W,3)`, `depth (S,H,W)`, `intrinsic (S,3,3)`, `extrinsic (S,4,4)` world-to-camera, optional `depth_conf`), or a per-frame directory produced by `batch_demo.py --save_predictions`:
+
+```
+scene_name/
+  frame_000000.npz    # per-frame slice of each key
+  frame_000001.npz
+  ...
+  meta.npz            # optional non-sequence metadata
+```
+
+Per-frame files are loaded in parallel and stacked automatically — recommended for 500+ frame sequences.
+
+See [`demo_render/README.md`](demo_render/README.md) for the full parameter reference (scene / preprocess / camera segments / render / overlay / pipeline / gpu), multi-segment camera path examples, and library-style usage.
 
 # 📜 License
 

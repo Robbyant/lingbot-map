@@ -248,20 +248,36 @@ class FlashInferBlock(nn.Module):
             manager = kv_cache
             # Compiled: norm1 + qkv linear + reshape + q_norm + k_norm + RoPE + format
             q_nhd, k_nhd, v_nhd = self.attn_pre(x, pos=pos, enable_3d_rope=enable_3d_rope)
-            # Eager: write frame K/V to paged cache
-            manager.append_frame(global_idx, k_nhd, v_nhd)
-            # CPU-only: update eviction state (deque ops, no GPU kernel)
-            manager.evict_frames(
-                block_idx=global_idx,
-                scale_frames=self.attn.kv_cache_scale_frames,
-                sliding_window=self.attn.kv_cache_sliding_window,
-                cross_frame_special=self.attn.kv_cache_cross_frame_special,
-                include_scale_frames=self.attn.kv_cache_include_scale_frames,
-                camera_only=self.attn.kv_cache_camera_only,
-                num_register_tokens=num_register_tokens,
-            )
-            # Eager: FlashInfer BatchPrefillWithPagedKVCacheWrapper
-            attn_x = manager.compute_attention(global_idx, q_nhd)
+
+            # Non-keyframe path: attend to cache+current but don't persist the
+            # current frame.  FlashInfer paged attention can only read from the
+            # paged cache, so we temporarily append (with eviction deferred so
+            # it stays clean), attend, and then roll back the append.  Mirrors
+            # the ``skip_append`` behavior of the SDPA dict path.
+            skip_append = getattr(manager, '_skip_append', False)
+            if skip_append:
+                prev_defer = manager._defer_eviction
+                manager._defer_eviction = True
+                manager.append_frame(global_idx, k_nhd, v_nhd)
+                attn_x = manager.compute_attention(global_idx, q_nhd)
+                manager.rollback_last_frame(global_idx)
+                manager._defer_eviction = prev_defer
+            else:
+                # Eager: write frame K/V to paged cache
+                manager.append_frame(global_idx, k_nhd, v_nhd)
+                # CPU-only: update eviction state (deque ops, no GPU kernel)
+                manager.evict_frames(
+                    block_idx=global_idx,
+                    scale_frames=self.attn.kv_cache_scale_frames,
+                    sliding_window=self.attn.kv_cache_sliding_window,
+                    cross_frame_special=self.attn.kv_cache_cross_frame_special,
+                    include_scale_frames=self.attn.kv_cache_include_scale_frames,
+                    camera_only=self.attn.kv_cache_camera_only,
+                    num_register_tokens=num_register_tokens,
+                )
+                # Eager: FlashInfer BatchPrefillWithPagedKVCacheWrapper
+                attn_x = manager.compute_attention(global_idx, q_nhd)
+
             # [tpf, H, D] -> [B, tpf, C]  (B=1 in streaming, contiguous from FlashInfer output)
             attn_x = attn_x.reshape(x.shape[0], q_nhd.shape[0],
                                     self.attn.num_heads * self.attn.head_dim)

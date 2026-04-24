@@ -319,22 +319,22 @@ def main():
         type=int,
         default=None,
         help="Streaming only. Every N-th frame after scale frames is kept as a keyframe. 1 = every frame. "
-             "If unset, auto-selected: 1 when num_frames <= 320, else ceil(num_frames / 320).",
+            "If unset, auto-selected: 1 when num_frames <= 320, else ceil(num_frames / 320).",
     )
     parser.add_argument("--kv_cache_sliding_window", type=int, default=64)
     parser.add_argument("--camera_num_iterations", type=int, default=4,
                         help="Camera head iterative-refinement steps. Default 4; set 1 for faster inference "
-                             "(skips 3 refinement passes at a small accuracy cost).")
+                            "(skips 3 refinement passes at a small accuracy cost).")
     parser.add_argument("--use_sdpa", action="store_true", default=False,
                         help="Use SDPA backend (no flashinfer needed). Default: FlashInfer")
     parser.add_argument("--compile", action="store_true", default=False,
                         help="torch.compile hot modules (reduce-overhead) with a CUDA-graph warmup. "
-                             "Streaming mode only; ~5 FPS faster at 518x378. Adds ~30-60 s warmup time.")
+                            "Streaming mode only; ~5 FPS faster at 518x378. Adds ~30-60 s warmup time.")
     parser.add_argument(
         "--offload_to_cpu",
         action=argparse.BooleanOptionalAction,
         help="Offload per-frame predictions to CPU during inference to cut GPU peak memory. "
-             "Use --no-offload_to_cpu to keep outputs on GPU.",
+            "Use --no-offload_to_cpu to keep outputs on GPU.",
     )
     # Windowed options
     parser.add_argument("--window_size", type=int, default=64, help="Frames per window (windowed mode)")

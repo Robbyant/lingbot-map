@@ -9,6 +9,7 @@ Provides streaming inference functionality:
 """
 
 import logging
+import os
 import torch
 import torch.nn as nn
 from typing import Optional, Dict, Any, List
@@ -19,6 +20,55 @@ from lingbot_map.models.gct_base import GCTBase
 from lingbot_map.aggregator.stream import AggregatorStream
 
 logger = logging.getLogger(__name__)
+
+# Debug switch: export LINGBOT_DEBUG_KV=1 to print per-frame KV cache stats in
+# the streaming phase-2 loop.  Value: 1 (every frame), N (every N frames),
+# empty/unset (disabled).
+_KV_DEBUG = os.environ.get("LINGBOT_DEBUG_KV", "")
+
+
+def _parse_kv_debug_interval(val: str) -> int:
+    if not val:
+        return 0
+    try:
+        n = int(val)
+    except ValueError:
+        return 1
+    return max(0, n)
+
+
+@torch.no_grad()
+def _log_kv_stats(model, label: str = "") -> None:
+    """One-line dump of aggregator KV cache occupancy + aux counters."""
+    try:
+        parts = []
+        agg = getattr(model, "aggregator", None)
+        if agg is not None:
+            tfp = getattr(agg, "total_frames_processed", None)
+            if tfp is not None:
+                parts.append(f"tfp={tfp}")
+            mgr = getattr(agg, "kv_cache_manager", None)
+            if mgr is not None and hasattr(mgr, "get_cache_stats"):
+                s = mgr.get_cache_stats(block_idx=0)
+                parts.append(
+                    f"FI[blk0] frames={s['frame_count']} "
+                    f"scale_pg={s['scale_pages']} live_pg={s['live_pages']} "
+                    f"free_pg={s['free_pages']} special={s['special_tokens']}"
+                )
+            elif isinstance(getattr(agg, "kv_cache", None), dict):
+                kv = agg.kv_cache
+                k0 = kv.get("k_0")
+                if torch.is_tensor(k0):
+                    parts.append(f"SDPA[blk0] k_shape={tuple(k0.shape)}")
+                parts.append(f"skip_append={kv.get('_skip_append', False)}")
+        cam = getattr(model, "camera_head", None)
+        if cam is not None:
+            fi = getattr(cam, "frame_idx", None)
+            if fi is not None:
+                parts.append(f"cam.frame_idx={fi}")
+        tqdm.write(f"[KV] {label} | {' | '.join(parts)}")
+    except Exception as e:  # pragma: no cover — debug helper, never fatal
+        tqdm.write(f"[KV] {label} | stats error: {e}")
 
 
 class GCTStream(GCTBase):
@@ -259,6 +309,10 @@ class GCTStream(GCTBase):
         """
         if hasattr(self.aggregator, 'kv_cache') and self.aggregator.kv_cache is not None:
             self.aggregator.kv_cache["_skip_append"] = skip
+        # FlashInfer manager — honored by attention.py's FlashInfer phase-2
+        # branch to avoid persisting non-keyframes in the paged cache.
+        if hasattr(self.aggregator, 'kv_cache_manager') and self.aggregator.kv_cache_manager is not None:
+            self.aggregator.kv_cache_manager._skip_append = skip
         if self.camera_head is not None and hasattr(self.camera_head, 'kv_cache') and self.camera_head.kv_cache is not None:
             for cache_dict in self.camera_head.kv_cache:
                 cache_dict["_skip_append"] = skip
@@ -356,6 +410,9 @@ class GCTStream(GCTBase):
         # These frames get bidirectional attention among themselves via scale token
         logger.info(f'Processing {scale_frames} scale frames...')
         scale_images = images[:, :scale_frames]
+        # No-op unless hot modules were compiled with mode="reduce-overhead";
+        # required then to reset CUDA-graph step state between replays.
+        torch.compiler.cudagraph_mark_step_begin()
         scale_output = self.forward(
             scale_images,
             num_frame_for_scale=scale_frames,
@@ -378,6 +435,9 @@ class GCTStream(GCTBase):
             initial=scale_frames,
             total=S,
         )
+        dbg_every = _parse_kv_debug_interval(_KV_DEBUG)
+        if dbg_every:
+            _log_kv_stats(self, label="after phase-1 scale")
         for i in pbar:
             frame_image = images[:, i:i+1]
 
@@ -387,6 +447,7 @@ class GCTStream(GCTBase):
             if not is_keyframe:
                 self._set_skip_append(True)
 
+            torch.compiler.cudagraph_mark_step_begin()
             frame_output = self.forward(
                 frame_image,
                 num_frame_for_scale=scale_frames,  # Keep same for scale token logic
@@ -396,6 +457,12 @@ class GCTStream(GCTBase):
 
             if not is_keyframe:
                 self._set_skip_append(False)
+
+            if dbg_every and ((i - scale_frames) % dbg_every == 0):
+                _log_kv_stats(
+                    self,
+                    label=f"i={i} {'KF' if is_keyframe else 'nkf'}",
+                )
 
             all_pose_enc.append(_to_out(frame_output["pose_enc"]))
             if "depth" in frame_output:
