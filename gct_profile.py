@@ -61,13 +61,19 @@ def compile_model(model):
 # Profiling — reuse one CUDA event pair, sync after every frame
 # ============================================================================
 
-def profile_streaming(model, images, num_frames, dtype):
+def profile_streaming(model, images, num_frames, dtype, keyframe_interval=1):
     """
     Run streaming inference. Return (per_frame_ms, scale_frames, phase1_ms).
 
     Reuses a single CUDA event pair across frames and syncs after every frame
     (matches the original non-lightweight path — necessary to keep GPU clock /
     memory allocator behavior comparable run-to-run).
+
+    With ``keyframe_interval > 1``, every N-th phase-2 frame is a keyframe whose
+    KV is appended to cache; non-keyframes go through the
+    ``_set_skip_append(True)`` defer+append+attend+rollback path (per
+    ``docs/keyframe_interval_bugfix.md``). All frames still time the same
+    forward op, so per-frame ms reflects the actual cost difference.
     """
     device = next(model.parameters()).device
     if images.ndim == 4:
@@ -75,6 +81,7 @@ def profile_streaming(model, images, num_frames, dtype):
     images = images.to(dtype)
     S = min(images.shape[1], num_frames)
     scale_frames = min(8, S)
+    kf_int = max(int(keyframe_interval), 1)
 
     autocast_ctx = (
         contextlib.nullcontext() if dtype == torch.float32
@@ -108,6 +115,9 @@ def profile_streaming(model, images, num_frames, dtype):
     # ── Phase 2: causal streaming, one frame at a time ─────────────────────
     per_frame_ms = []
     for i in range(scale_frames, S):
+        is_keyframe = (kf_int <= 1) or ((i - scale_frames) % kf_int == 0)
+        if not is_keyframe:
+            model._set_skip_append(True)
         frame = images[:, i:i + 1].to(device)  # outside the timed region
         start_ev.record()
         torch.compiler.cudagraph_mark_step_begin()
@@ -120,6 +130,8 @@ def profile_streaming(model, images, num_frames, dtype):
             )
         end_ev.record()
         torch.cuda.synchronize()
+        if not is_keyframe:
+            model._set_skip_append(False)
         per_frame_ms.append(start_ev.elapsed_time(end_ev))
 
     return per_frame_ms, scale_frames, phase1_ms
@@ -227,10 +239,18 @@ def main():
     parser.add_argument('--compile', action='store_true', default=True,
                         help='torch.compile hot modules (reduce-overhead) and drop point_head. '
                              'Typically ~5 FPS faster at 518×378.')
+    parser.add_argument('--keyframe_interval', type=int, default=1,
+                        help='Every N-th phase-2 frame is a keyframe whose KV stays in cache; '
+                             'non-keyframes go through skip_append (defer+append+attend+rollback). '
+                             '1 = every frame is a keyframe (default). With --compile, the warmup '
+                             'alternates keyframe/non-keyframe so both code paths capture CUDA graphs.')
     parser.add_argument('--fa3', action='store_true',
                         help='Use FlashInfer FA3 (SM90) kernel instead of FA2 (requires power-of-2 page_size)')
 
     args = parser.parse_args()
+
+    if args.keyframe_interval < 1:
+        parser.error(f"--keyframe_interval must be >= 1 (got {args.keyframe_interval})")
 
     dtype_map = {'bf16': torch.bfloat16, 'fp32': torch.float32}
     backends = ['sdpa', 'flashinfer'] if args.backend == 'both' else [args.backend]
@@ -239,7 +259,8 @@ def main():
 
     print("=" * 72)
     print(f"GCTStream FPS profiling  |  {args.img_h}×{args.img_w}  |  "
-          f"{args.num_frames} frames  |  sw={args.sliding_window}")
+          f"{args.num_frames} frames  |  sw={args.sliding_window}  |  "
+          f"kf_int={args.keyframe_interval}")
     print(f"  backends={backends}  dtypes={dtypes}")
     print("=" * 72)
 
@@ -286,8 +307,18 @@ def main():
             warm_scale = images_master[:1, :8].to(device=device, dtype=dtype)
             warm_stream = images_master[:1, 8:8 + WARMUP_STREAM].to(device=device, dtype=dtype)
 
+            kf_int = args.keyframe_interval
+
             def _warm(m, passes=1):
-                """Run `passes` full `clean → Phase-1 → N-stream` sequences."""
+                """Run `passes` full `clean → Phase-1 → N-stream` sequences.
+
+                When ``kf_int > 1`` the inner stream loop alternates keyframe /
+                non-keyframe forwards (matching what `profile_streaming` will do)
+                so that `torch.compile` warms BOTH the append-and-evict path and
+                the skip_append (defer+append+attend+rollback) path before the
+                measured run begins. Otherwise non-keyframes hit cold orchestration
+                code on every measured frame, masking the real `--compile` win.
+                """
                 for _ in range(passes):
                     m.clean_kv_cache()
                     torch.compiler.cudagraph_mark_step_begin()
@@ -295,10 +326,15 @@ def main():
                         m.forward(warm_scale, num_frame_for_scale=8,
                                   num_frame_per_block=8, causal_inference=True)
                     for i in range(WARMUP_STREAM):
+                        is_keyframe = (kf_int <= 1) or (i % kf_int == 0)
+                        if not is_keyframe:
+                            m._set_skip_append(True)
                         torch.compiler.cudagraph_mark_step_begin()
                         with torch.no_grad(), autocast_ctx:
                             m.forward(warm_stream[:, i:i + 1], num_frame_for_scale=8,
                                       num_frame_per_block=1, causal_inference=True)
+                        if not is_keyframe:
+                            m._set_skip_append(False)
                 torch.cuda.synchronize()
 
             # Eager warmup populates RoPE / kernel caches BEFORE torch.compile
@@ -323,6 +359,7 @@ def main():
             images = images_master.to(dtype=dtype)
             per_frame_ms, scale_frames, phase1_ms = profile_streaming(
                 model, images, args.num_frames, dtype,
+                keyframe_interval=args.keyframe_interval,
             )
             results[key] = summarize(per_frame_ms, scale_frames, phase1_ms, key)
 

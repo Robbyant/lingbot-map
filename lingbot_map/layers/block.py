@@ -436,7 +436,11 @@ class CameraBlock(nn.Module):
                 x = x + ffn_residual_func(x)
             return x
 
-        mask_block = self._prepare_blockwise_causal_attn_mask(
+        # Skip mask creation when using KV cache (streaming mode) — the streaming
+        # attention path in CausalAttention ignores block_mask entirely.
+        mask_block = None
+        if kv_cache is None:
+            mask_block = self._prepare_blockwise_causal_attn_mask(
                 device=x.device, num_frames=num_frames, frame_seqlen=frame_seqlen, num_frame_per_block=num_frame_per_block)
 
 
