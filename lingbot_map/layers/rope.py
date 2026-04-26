@@ -354,7 +354,10 @@ class WanRotaryPosEmbed(nn.Module):
         """
 
         # 步骤1：将预计算的频率移到目标设备，并分割成三个维度
-        self.freqs = self.freqs.to(device)
+        if device.type == "mps":
+            freqs_tensor = self.freqs.to(dtype=torch.complex64).to(device)
+        else:
+            freqs_tensor = self.freqs.to(device)
         # 获取实际的维度分配
         if hasattr(self, 'fhw_dim') and self.fhw_dim is not None:
             t_dim, h_dim, w_dim = self.fhw_dim
@@ -364,7 +367,7 @@ class WanRotaryPosEmbed(nn.Module):
             t_dim = self.attention_head_dim - h_dim - w_dim
         
         # 使用正确的split sizes（每个维度的一半）
-        freqs = self.freqs.split_with_sizes(
+        freqs = freqs_tensor.split_with_sizes(
             [
                 t_dim // 2,  # 时间维度
                 h_dim // 2,  # 高度维度
@@ -453,7 +456,8 @@ def apply_rotary_emb(x, freqs):
     """
     # 步骤1：reshape成 [..., head_dim//2, 2] 形式，最后一维表示(real, imag)
     # 例如：[b, h, seq, 64] -> [b, h, seq, 32, 2]
-    x_reshaped = x.to(torch.float64).reshape(x.shape[0], x.shape[1], x.shape[2], -1, 2)
+    rotary_dtype = torch.float32 if x.device.type == "mps" else torch.float64
+    x_reshaped = x.to(rotary_dtype).reshape(x.shape[0], x.shape[1], x.shape[2], -1, 2)
     
     # 步骤2：转换为复数表示 [b, h, seq, 32]
     # 每个元素是 real + imag*i
