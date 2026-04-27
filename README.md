@@ -34,7 +34,15 @@ LingBot-Map has focused on:
 
 # 📰 News
 
+- **2026-04-27** — 🚀 **LingBot-Map accelerated**. Pull the latest `main` and run `python demo.py --compile ...` or `python gct_profile.py --backend flashinfer --dtype bf16 --compile` to verify on your hardware.
 - **2026-04-24** — Fixed a FlashInfer KV cache bug where `--keyframe_interval > 1` silently cached non-keyframes. **You should now see better pose and reconstruction quality when running with more than 320 frames**.
+---
+
+# 📋 TODO
+
+- [ ] Release evaluation benchmark
+- [ ] Release demo scripts
+
 ---
 
 # ⚙️ Quick Start

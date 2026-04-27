@@ -109,11 +109,14 @@ class RotaryPositionEmbedding2D(nn.Module):
             positions = torch.arange(seq_len, device=device, dtype=inv_freq.dtype)
             angles = torch.einsum("i,j->ij", positions, inv_freq)
 
-            # Compute and cache frequency components
+            # Compute and cache frequency components.
+            # .detach().clone() ensures the cached tensors are plain CUDA tensors
+            # (not CUDA-graph-owned memory), so they can safely be reused as inputs
+            # to subsequent torch.compile / CUDA graph captures.
             angles = angles.to(dtype)
             angles = torch.cat((angles, angles), dim=-1)
-            cos_components = angles.cos().to(dtype)
-            sin_components = angles.sin().to(dtype)
+            cos_components = angles.cos().to(dtype).detach().clone()
+            sin_components = angles.sin().to(dtype).detach().clone()
             self.frequency_cache[cache_key] = (cos_components, sin_components)
 
         return self.frequency_cache[cache_key]
@@ -175,8 +178,13 @@ class RotaryPositionEmbedding2D(nn.Module):
         # Compute feature dimension for each spatial direction
         feature_dim = tokens.size(-1) // 2
 
-        # Get frequency components
-        max_position = int(positions.max()) + 1
+        # Get frequency components.
+        # Use positions.shape[1] (token count) as the frequency table size instead of
+        # int(positions.max()) + 1.  Both are valid upper bounds, but shape[1] is a
+        # static integer known at trace time, so it is CUDA-graph-compatible.
+        # (positions.max() requires a device→host sync / aten._local_scalar_dense,
+        # which prevents CUDA graph capture in torch.compile.)
+        max_position = positions.shape[1]
         cos_comp, sin_comp = self._compute_frequency_components(feature_dim, max_position, tokens.device, tokens.dtype)
 
         # Split features for vertical and horizontal processing
@@ -425,50 +433,29 @@ class WanRotaryPosEmbed(nn.Module):
         return freqs
     
 def apply_rotary_emb(x, freqs):
+    """Apply 3D rotary position embedding using real arithmetic (torch.compile-safe).
+
+    Equivalent to complex multiplication but avoids torch.view_as_complex /
+    view_as_real, which are not supported by torchinductor and break CUDA graphs.
+
+    Args:
+        x: [B, H, N, D] real tensor (bfloat16 or float32).
+        freqs: [1, 1, N, D//2] complex tensor (cos + i*sin per frequency).
+
+    Returns:
+        [B, H, N, D] tensor of same dtype as x.
     """
-    应用旋转位置编码到输入特征
-    
-    核心思想：使用复数乘法实现特征旋转，保持相对位置信息
-    
-    数学原理：
-    对于2D向量 [x1, x2]，旋转θ角度可以表示为复数乘法：
-    (x1 + ix2) * e^(iθ) = (x1 + ix2) * (cos(θ) + i*sin(θ))
-                        = (x1*cos(θ) - x2*sin(θ)) + i*(x1*sin(θ) + x2*cos(θ))
-    
-    这等价于旋转矩阵：
-    [cos(θ)  -sin(θ)] [x1]
-    [sin(θ)   cos(θ)] [x2]
-    
-    参数：
-    - x: 输入特征 [batch, heads, seq_len, head_dim]
-    - freqs: 旋转频率（复数） [1, 1, seq_len, head_dim//2]
-    
-    返回：
-    - x_out: 旋转后的特征 [batch, heads, seq_len, head_dim]
-    
-    实现步骤：
-    1. 将x的每两个连续特征看作一个复数 (real, imag)
-    2. 与预计算的复数频率 e^(iθ) 相乘
-    3. 转回实数表示
-    """
-    # 步骤1：reshape成 [..., head_dim//2, 2] 形式，最后一维表示(real, imag)
-    # 例如：[b, h, seq, 64] -> [b, h, seq, 32, 2]
-    x_reshaped = x.to(torch.float64).reshape(x.shape[0], x.shape[1], x.shape[2], -1, 2)
-    
-    # 步骤2：转换为复数表示 [b, h, seq, 32]
-    # 每个元素是 real + imag*i
-    x_complex = torch.view_as_complex(x_reshaped)
-    
-    # 步骤3：复数乘法实现旋转
-    # x_complex * freqs 相当于将每对特征旋转θ角度
-    # freqs已经是 e^(iθ) = cos(θ) + i*sin(θ) 的形式
-    x_rotated = x_complex * freqs
-    
-    # 步骤4：转回实数表示 [b, h, seq, 32, 2]
-    x_real = torch.view_as_real(x_rotated)
-    
-    # 步骤5：展平最后两维 [b, h, seq, 64]
-    x_out = x_real.flatten(3)
-    
-    # 步骤6：转回原始数据类型
-    return x_out.to(x.dtype)
+    # Real-arithmetic implementation: equivalent to (x1+i*x2)*(cos+i*sin) but avoids
+    # torch.view_as_complex / view_as_real which break torch.compile CUDA graphs.
+    cos = freqs.real.to(x.dtype)  # [1, 1, N, D//2]
+    sin = freqs.imag.to(x.dtype)  # [1, 1, N, D//2]
+
+    # Interleaved pairs: even indices = "real", odd indices = "imag"
+    x1 = x[..., 0::2]  # [B, H, N, D//2]
+    x2 = x[..., 1::2]  # [B, H, N, D//2]
+
+    # (x1 + i*x2) * (cos + i*sin) = (x1*cos - x2*sin) + i*(x1*sin + x2*cos)
+    out1 = x1 * cos - x2 * sin
+    out2 = x1 * sin + x2 * cos
+
+    return torch.stack([out1, out2], dim=-1).reshape(x.shape)

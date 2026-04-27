@@ -318,8 +318,11 @@ def main():
         "--keyframe_interval",
         type=int,
         default=None,
-        help="Streaming only. Every N-th frame after scale frames is kept as a keyframe. 1 = every frame. "
-            "If unset, auto-selected: 1 when num_frames <= 320, else ceil(num_frames / 320).",
+        help="Every N-th frame after scale frames is kept as a keyframe. 1 = every frame. "
+            "Streaming: if unset, auto-selected (1 when num_frames <= 320, else ceil(num_frames / 320)) "
+            "to bound KV cache. Windowed: defaults to 1; --window_size counts keyframes, so values >1 "
+            "expand each window's actual-frame coverage to "
+            "scale_frames + (window_size - scale_frames) * keyframe_interval.",
     )
     parser.add_argument("--kv_cache_sliding_window", type=int, default=64)
     parser.add_argument("--camera_num_iterations", type=int, default=4,
@@ -333,13 +336,14 @@ def main():
     parser.add_argument(
         "--offload_to_cpu",
         action=argparse.BooleanOptionalAction,
-        help="Offload per-frame predictions to CPU during inference to cut GPU peak memory. "
-            "Use --no-offload_to_cpu to keep outputs on GPU.",
+        default=False,
+        help="Offload per-frame predictions to CPU during inference to cut GPU peak memory "
+            "(on by default).  Use --no-offload_to_cpu to keep outputs on GPU.",
     )
     # Windowed options
     parser.add_argument("--window_size", type=int, default=64, help="Frames per window (windowed mode)")
-    parser.add_argument("--overlap_size", type=int, default=16, help="Overlap between windows")
-
+    parser.add_argument("--overlap_size", type=int, default=16,
+                        help="Overlap between windows in *actual frames*")
 
     # Visualization
     parser.add_argument("--port", type=int, default=8080)
@@ -420,14 +424,22 @@ def main():
         else:
             args.keyframe_interval = 1
 
-    if args.mode != "streaming" and args.keyframe_interval != 1:
-        print("Warning: --keyframe_interval only applies to --mode streaming. Ignoring it for windowed inference.")
-        args.keyframe_interval = 1
-    elif args.mode == "streaming" and args.keyframe_interval > 1:
-        print(
-            f"Keyframe streaming enabled: interval={args.keyframe_interval} "
-            f"(after the first {args.num_scale_frames} scale frames)."
-        )
+    if args.keyframe_interval > 1:
+        if args.mode == "streaming":
+            print(
+                f"Keyframe streaming enabled: interval={args.keyframe_interval} "
+                f"(after the first {args.num_scale_frames} scale frames)."
+            )
+        else:  # windowed
+            actual_per_window = (
+                args.num_scale_frames
+                + max(0, args.window_size - args.num_scale_frames) * args.keyframe_interval
+            )
+            print(
+                f"Keyframe windowed enabled: interval={args.keyframe_interval}, "
+                f"each window covers up to {actual_per_window} actual frames "
+                f"(window_size={args.window_size} keyframes, scale={args.num_scale_frames})."
+            )
 
     # ── Optional: torch.compile + CUDA-graph warmup (streaming only) ────────
     if args.compile:
@@ -475,7 +487,8 @@ def main():
                 window_size=args.window_size,
                 overlap_size=args.overlap_size,
                 num_scale_frames=args.num_scale_frames,
-                output_device=output_device,
+                keyframe_interval=args.keyframe_interval,
+                output_device=output_device
             )
 
     print(f"Inference done in {time.time() - t0:.1f}s")
