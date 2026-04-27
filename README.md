@@ -91,7 +91,10 @@ python -m pip install -v .
 > (Optional) For faster first-use, you can additionally install a CUDA-specific JIT cache: `pip install flashinfer-jit-cache -f https://flashinfer.ai/whl/cu128/flashinfer-jit-cache/`.
 > See [FlashInfer installation](https://docs.flashinfer.ai/installation.html) for details. If FlashInfer is not installed, the model falls back to SDPA (PyTorch native attention) via `--use_sdpa`.
 
-**5. Visualization dependencies (optional)**
+**5. Optional export and sky-mask dependencies**
+
+The browser point-cloud viewer is installed with the base package. Install the
+optional `vis` extra only if you need GLB export or sky segmentation.
 
 ```bash
 pip install -e ".[vis]"
