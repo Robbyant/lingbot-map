@@ -245,6 +245,19 @@ python demo.py --model_path /path/to/checkpoint.pt \
 | `--point_size` | `0.00001` | Point cloud point size |
 | `--downsample_factor` | `10` | Spatial downsampling for point cloud display |
 
+### Saving Predictions for Later Visualization
+
+Use `--save_predictions` to keep a processed reconstruction and reopen it later
+without rerunning model inference.
+
+```bash
+python demo.py --model_path /path/to/checkpoint.pt \
+    --image_folder /path/to/images/ \
+    --save_predictions outputs/scene.pt
+
+python demo.py --load_predictions outputs/scene.pt
+```
+
 ### Without FlashInfer (SDPA fallback)
 
 ```bash
