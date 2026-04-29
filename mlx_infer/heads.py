@@ -104,6 +104,7 @@ class CameraHeadMLX(nn.Module):
         kv_cache_sliding_window: int = 64,
         kv_cache_scale_frames: int = 8,
         kv_cache_keep_special: bool = True,
+        kv_cache_max_special_tokens: Optional[int] = None,
     ):
         super().__init__()
         self.dim_in = dim_in
@@ -120,6 +121,7 @@ class CameraHeadMLX(nn.Module):
                 sliding_window=kv_cache_sliding_window,
                 scale_frames=kv_cache_scale_frames,
                 keep_special=kv_cache_keep_special,
+                max_special_tokens=kv_cache_max_special_tokens,
             )
             for _ in range(trunk_depth)
         ]
@@ -314,8 +316,8 @@ def _bilinear(x: mx.array, hw: Tuple[int, int], align_corners: bool = True) -> m
     x0 = mx.clip(mx.floor(x_src).astype(mx.int32), 0, W - 1)
     x1 = mx.clip(x0 + 1, 0, W - 1)
 
-    wy1 = (y_src - mx.floor(y_src)).reshape(1, h, 1, 1)
-    wx1 = (x_src - mx.floor(x_src)).reshape(1, 1, w, 1)
+    wy1 = (y_src - mx.floor(y_src)).reshape(1, h, 1, 1).astype(x.dtype)
+    wx1 = (x_src - mx.floor(x_src)).reshape(1, 1, w, 1).astype(x.dtype)
     wy0 = 1.0 - wy1
     wx0 = 1.0 - wx1
 
@@ -528,5 +530,5 @@ class DPTHeadMLX(nn.Module):
             emb = emb.reshape(ph, pw, C).astype(np.float32) * ratio
             self._pos_embed_cache[key] = mx.array(emb[None])  # [1, ph, pw, C]
 
-        emb = self._pos_embed_cache[key]
+        emb = self._pos_embed_cache[key].astype(x.dtype)
         return x + mx.broadcast_to(emb, x.shape)

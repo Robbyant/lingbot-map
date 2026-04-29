@@ -178,7 +178,7 @@ class CausalAttentionMLX(nn.Module):
     def __init__(self, dim: int, num_heads: int = 8, qkv_bias: bool = True,
                  proj_bias: bool = True, qk_norm: bool = False,
                  sliding_window: int = 64, scale_frames: int = 8,
-                 keep_special: bool = True):
+                 keep_special: bool = True, max_special_tokens: Optional[int] = None):
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
@@ -186,6 +186,7 @@ class CausalAttentionMLX(nn.Module):
         self.sliding_window = sliding_window
         self.scale_frames = scale_frames
         self.keep_special = keep_special
+        self.max_special_tokens = max_special_tokens
 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         self.proj = nn.Linear(dim, dim, bias=proj_bias)
@@ -243,14 +244,26 @@ class CausalAttentionMLX(nn.Module):
                     if n_frames > total_keep:
                         # Preserve special tokens from evicted frames
                         if self.keep_special:
-                            evict_k = k_cat[:, :, self.scale_frames:n_frames - self.sliding_window, :patch_start_idx, :]
-                            evict_v = v_cat[:, :, self.scale_frames:n_frames - self.sliding_window, :patch_start_idx, :]
+                            n_evict = n_frames - self.sliding_window - self.scale_frames
+                            evict_k = k_cat[:, :, self.scale_frames:self.scale_frames + n_evict,
+                                            :patch_start_idx, :]
+                            evict_v = v_cat[:, :, self.scale_frames:self.scale_frames + n_evict,
+                                            :patch_start_idx, :]
+                            # Store flat [B, H, n_evict*patch_start_idx, D] to avoid
+                            # reshape on every attention call.
+                            B_, H_, ne, ps, Dh = evict_k.shape
+                            evict_k = evict_k.reshape(B_, H_, ne * ps, Dh)
+                            evict_v = evict_v.reshape(B_, H_, ne * ps, Dh)
                             if kv_cache.get("k_special") is None:
                                 kv_cache["k_special"] = evict_k
                                 kv_cache["v_special"] = evict_v
                             else:
                                 kv_cache["k_special"] = mx.concatenate([kv_cache["k_special"], evict_k], axis=2)
                                 kv_cache["v_special"] = mx.concatenate([kv_cache["v_special"], evict_v], axis=2)
+                                if (self.max_special_tokens is not None and
+                                        kv_cache["k_special"].shape[2] > self.max_special_tokens):
+                                    kv_cache["k_special"] = kv_cache["k_special"][:, :, -self.max_special_tokens:]
+                                    kv_cache["v_special"] = kv_cache["v_special"][:, :, -self.max_special_tokens:]
                         kv_cache["k"] = mx.concatenate([
                             k_cat[:, :, :self.scale_frames],
                             k_cat[:, :, -self.sliding_window:],
@@ -273,15 +286,10 @@ class CausalAttentionMLX(nn.Module):
                 k_full = k_cached.reshape(B, self.num_heads, -1, self.head_dim)
                 v_full = v_cached.reshape(B, self.num_heads, -1, self.head_dim)
 
-                # Prepend preserved special tokens
+                # Prepend preserved special tokens (stored flat: [B, H, N_sp, D])
                 if kv_cache.get("k_special") is not None:
-                    ks = kv_cache["k_special"]
-                    vs = kv_cache["v_special"]
-                    sa, sb, sc, sd, se = ks.shape
-                    ks = ks.reshape(sa, sb, sc * sd, se)
-                    vs = vs.reshape(sa, sb, sc * sd, se)
-                    k_full = mx.concatenate([ks, k_full], axis=2)
-                    v_full = mx.concatenate([vs, v_full], axis=2)
+                    k_full = mx.concatenate([kv_cache["k_special"], k_full], axis=2)
+                    v_full = mx.concatenate([kv_cache["v_special"], v_full], axis=2)
 
             x_out = mx.fast.scaled_dot_product_attention(q, k_full, v_full, scale=self.scale)
 
@@ -296,13 +304,14 @@ class StreamingBlock(nn.Module):
                  qkv_bias: bool = True, proj_bias: bool = True, ffn_bias: bool = True,
                  qk_norm: bool = False, init_values: Optional[float] = None,
                  sliding_window: int = 64, scale_frames: int = 8,
-                 keep_special: bool = True):
+                 keep_special: bool = True, max_special_tokens: Optional[int] = None):
         super().__init__()
         self.norm1 = LayerNorm(dim)
         self.attn = CausalAttentionMLX(
             dim, num_heads=num_heads, qkv_bias=qkv_bias, proj_bias=proj_bias,
             qk_norm=qk_norm, sliding_window=sliding_window,
             scale_frames=scale_frames, keep_special=keep_special,
+            max_special_tokens=max_special_tokens,
         )
         self.ls1 = LayerScale(dim, init_values) if init_values else nn.Identity()
         self.norm2 = LayerNorm(dim)

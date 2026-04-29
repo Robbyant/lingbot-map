@@ -146,8 +146,16 @@ def main():
                         help="Number of initial scale frames (Phase 1)")
     parser.add_argument("--keyframe-interval", type=int, default=1,
                         help="Keyframe interval (1 = every frame)")
+    parser.add_argument("--kv-sliding-window", type=int, default=64,
+                        help="KV-cache sliding window in frames. "
+                             "Dominant cost is 24 attn blocks x window*1375 keys per frame. "
+                             "sw=64 (default/accurate), sw=16 (~2.5x faster), sw=8 (~3.3x faster)")
+    parser.add_argument("--max-special-frames", type=int, default=None,
+                        help="Cap k_special (evicted frames' tokens) at this many frames. "
+                             "k_special grows 6 tokens/frame indefinitely; for sequences "
+                             ">300 frames with small --kv-sliding-window, set to e.g. 100.")
     parser.add_argument("--dtype", choices=["float32", "float16"], default="float32",
-                        help="Compute dtype (float16 is faster but less stable)")
+                        help="Compute dtype (float16 is ~2x faster, recommended for speed)")
     parser.add_argument("--max-frames", type=int, default=None,
                         help="Only process first N frames (default: all)")
     # Visualization
@@ -165,6 +173,9 @@ def main():
 
     # ---- Build model ----
     print("Building GCTStreamMLX model...")
+    tokens_per_frame = (args.img_size // 14) ** 2 + 6
+    print(f"KV-cache: scale={args.scale_frames} + sliding={args.kv_sliding_window} frames "
+          f"= {(args.scale_frames + args.kv_sliding_window) * tokens_per_frame:,} keys/block")
     model = GCTStreamMLX(
         img_size=args.img_size,
         patch_size=14,
@@ -172,8 +183,9 @@ def main():
         depth=24,
         num_heads=16,
         num_register_tokens=4,
-        kv_cache_sliding_window=64,
+        kv_cache_sliding_window=args.kv_sliding_window,
         kv_cache_scale_frames=args.scale_frames,
+        kv_cache_max_special_frames=args.max_special_frames,
         camera_num_iterations=4,
         enable_depth=True,
         enable_point=False,
@@ -196,7 +208,7 @@ def main():
 
     if args.dtype == "float16":
         images = images.astype(mx.float16)
-        model.apply(lambda x: x.astype(mx.float16) if mx.is_array(x) else x)
+        model.apply(lambda x: x.astype(mx.float16) if isinstance(x, mx.array) else x)
 
     # ---- Streaming inference ----
     print("Running streaming inference...")

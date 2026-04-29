@@ -119,16 +119,16 @@ class ViTMLX(nn.Module):
             self._pos_embed_cache = {}
         if key not in self._pos_embed_cache:
             from scipy.ndimage import zoom
-            patch_pe = np.array(self.pos_embed[0, 1:])      # [M*M, C]
+            patch_pe = np.array(self.pos_embed[0, 1:], dtype=np.float32)  # [M*M, C]
             patch_pe = patch_pe.reshape(M, M, -1)            # [M, M, C]
             scale_h = h / M
             scale_w = w / M
             patch_pe = zoom(patch_pe, (scale_h, scale_w, 1), order=3)  # bicubic
             patch_pe = patch_pe.reshape(1, h * w, -1)        # [1, h*w, C]
-            cls_pe = np.array(self.pos_embed[0:1, :1])       # [1, 1, C]
+            cls_pe = np.array(self.pos_embed[0:1, :1], dtype=np.float32)  # [1, 1, C]
             full_pe = np.concatenate([cls_pe, patch_pe], axis=1)
             self._pos_embed_cache[key] = mx.array(full_pe.astype(np.float32))
-        return self._pos_embed_cache[key]
+        return self._pos_embed_cache[key].astype(self.pos_embed.dtype)
 
     def __call__(self, x: mx.array) -> mx.array:
         """x: [B, H, W, 3] → patch tokens [B, N_patch, embed_dim]."""
@@ -207,6 +207,7 @@ class AggregatorMLX(nn.Module):
         kv_cache_sliding_window: int = 64,
         kv_cache_scale_frames: int = 8,
         kv_cache_keep_special: bool = True,
+        kv_cache_max_special_frames: Optional[int] = None,
     ):
         super().__init__()
         assert depth % aa_block_size == 0
@@ -242,6 +243,12 @@ class AggregatorMLX(nn.Module):
         # Frame blocks: standard TransformerBlock (per-frame, no KV cache)
         self.frame_blocks = [TransformerBlock(**block_kw) for _ in range(depth)]
 
+        # patch_start_idx: camera(1) + register(num_register_tokens) + scale(1)
+        # Computed here (before StreamingBlocks) so we can pass max_special_tokens.
+        self.patch_start_idx = 1 + num_register_tokens + 1
+        _max_sp_tok = (kv_cache_max_special_frames * self.patch_start_idx
+                       if kv_cache_max_special_frames is not None else None)
+
         # Global blocks: StreamingBlock with causal KV cache
         self.global_blocks = [
             StreamingBlock(
@@ -249,6 +256,7 @@ class AggregatorMLX(nn.Module):
                 sliding_window=kv_cache_sliding_window,
                 scale_frames=kv_cache_scale_frames,
                 keep_special=kv_cache_keep_special,
+                max_special_tokens=_max_sp_tok,
             )
             for _ in range(depth)
         ]
@@ -258,9 +266,6 @@ class AggregatorMLX(nn.Module):
         self.camera_token   = mx.zeros((1, 2, 1, embed_dim))
         self.register_token = mx.zeros((1, 2, num_register_tokens, embed_dim))
         self.scale_token    = mx.ones((1, 2, 1, embed_dim))
-
-        # patch_start_idx: camera(1) + register(num_register_tokens) + scale(1)
-        self.patch_start_idx = 1 + num_register_tokens + 1
         self.num_special_tokens = self.patch_start_idx
 
         # KV cache: one dict per global block, initialised lazily
@@ -372,12 +377,13 @@ class AggregatorMLX(nn.Module):
         # transpose to NHWC: [B*S, H, W, 3]
         imgs = images.reshape(B * S, 3, H, W)
         imgs = imgs.transpose(0, 2, 3, 1)                   # [B*S, H, W, 3]
-        mean = mx.array(_RESNET_MEAN, dtype=imgs.dtype).reshape(1, 1, 1, 3)
-        std  = mx.array(_RESNET_STD,  dtype=imgs.dtype).reshape(1, 1, 1, 3)
-        imgs = (imgs - mean) / std
+        imgs = (imgs - self._mean.astype(imgs.dtype)) / self._std.astype(imgs.dtype)
 
         # ---- DINOv2 patch embedding ----
         patch_tokens = self.patch_embed(imgs)                # [B*S, N_patch, C]
+        # Materialise the backbone before frame/global blocks so MLX compiles
+        # two smaller subgraphs rather than one 72-block graph per frame.
+        mx.eval(patch_tokens)
         C = patch_tokens.shape[-1]
 
         # ---- Special tokens ----
@@ -393,6 +399,9 @@ class AggregatorMLX(nn.Module):
         head_dim = self.embed_dim // self.num_heads          # 64 for ViT-L
         cos, sin = self.rope.get_cos_sin(
             None, pos, head_dim=head_dim)                    # [B*S, 1, P, 64]
+        # Cast to compute dtype so float16 Q/K aren't silently upcast by float32 tables.
+        cos = cos.astype(tokens.dtype)
+        sin = sin.astype(tokens.dtype)
 
         # ---- Alternating frame / global attention ----
         output_list: List[mx.array] = []
@@ -437,6 +446,9 @@ class AggregatorMLX(nn.Module):
             if selected_idx is None or group in selected_idx:
                 for fi, gi in zip(frame_outs, global_outs):
                     output_list.append(mx.concatenate([fi, gi], axis=-1))  # [B, S, P, 2C]
+                # Break the lazy graph: forces this segment to execute and lets the
+                # next segment compile independently (~6 blocks per segment).
+                mx.eval(tokens_global)
 
         # Update frame counter (only on keyframe path, skip_append=False)
         if self._kv_cache is not None and not self._kv_cache[0].get("_skip_append", False):

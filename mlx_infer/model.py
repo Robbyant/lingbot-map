@@ -46,6 +46,7 @@ class GCTStreamMLX(nn.Module):
         kv_cache_sliding_window: int = 64,
         kv_cache_scale_frames: int = 8,
         kv_cache_keep_special: bool = True,
+        kv_cache_max_special_frames: Optional[int] = None,
         camera_num_iterations: int = 4,
         enable_depth: bool = True,
         enable_point: bool = True,
@@ -54,6 +55,10 @@ class GCTStreamMLX(nn.Module):
         self.embed_dim = embed_dim
         self.patch_size = patch_size
         dim_2c = 2 * embed_dim   # concatenated frame+global output dim
+
+        # patch_start_idx = camera(1) + register(num_register_tokens) + scale(1)
+        _max_sp_tok = (kv_cache_max_special_frames * (1 + num_register_tokens + 1)
+                       if kv_cache_max_special_frames is not None else None)
 
         self.aggregator = AggregatorMLX(
             img_size=img_size,
@@ -65,6 +70,7 @@ class GCTStreamMLX(nn.Module):
             kv_cache_sliding_window=kv_cache_sliding_window,
             kv_cache_scale_frames=kv_cache_scale_frames,
             kv_cache_keep_special=kv_cache_keep_special,
+            kv_cache_max_special_frames=kv_cache_max_special_frames,
         )
 
         self.camera_head = CameraHeadMLX(
@@ -75,6 +81,7 @@ class GCTStreamMLX(nn.Module):
             kv_cache_sliding_window=kv_cache_sliding_window,
             kv_cache_scale_frames=kv_cache_scale_frames,
             kv_cache_keep_special=kv_cache_keep_special,
+            kv_cache_max_special_tokens=_max_sp_tok,
         )
 
         self.depth_head = DPTHeadMLX(
