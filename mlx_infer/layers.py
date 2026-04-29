@@ -187,11 +187,60 @@ class CausalAttentionMLX(nn.Module):
         self.scale_frames = scale_frames
         self.keep_special = keep_special
         self.max_special_tokens = max_special_tokens
+        self._steady_fn: Optional[Any] = None  # compiled steady-state step (built lazily)
 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         self.proj = nn.Linear(dim, dim, bias=proj_bias)
         self.q_norm = LayerNorm(self.head_dim) if qk_norm else nn.Identity()
         self.k_norm = LayerNorm(self.head_dim) if qk_norm else nn.Identity()
+
+    def _make_steady_fn(self, tokens_per_frame: int, patch_start_idx: int):
+        """Compiled pure function for the steady-state forward pass.
+
+        Steady state: cache is exactly scale_frames+sliding_window frames,
+        k_special is exactly max_special_tokens tokens, single new frame,
+        no skip. All shapes are constant so Metal reuses the same program.
+        """
+        qkv_fn = self.qkv; proj_fn = self.proj
+        q_norm_fn = self.q_norm; k_norm_fn = self.k_norm
+        H = self.num_heads; D = self.head_dim; scale = self.scale
+        sf = self.scale_frames; sw = self.sliding_window; ps = patch_start_idx
+
+        def _step(x, k_cache, v_cache, k_special, v_special, rope_cos, rope_sin):
+            B, N, C = x.shape
+            qkv = qkv_fn(x).reshape(B, N, 3, H, D)
+            qkv = qkv.transpose(0, 2, 3, 1, 4)
+            q, k, v = qkv[:, 0], qkv[:, 1], qkv[:, 2]
+            q = q_norm_fn(q); k = k_norm_fn(k)
+            q, k = apply_rope_2d(q, k, rope_cos, rope_sin)
+
+            k_new = k.reshape(B, H, 1, tokens_per_frame, D)
+            v_new = v.reshape(B, H, 1, tokens_per_frame, D)
+            k_cat = mx.concatenate([k_cache, k_new], axis=2)  # [B, H, sf+sw+1, T, D]
+            v_cat = mx.concatenate([v_cache, v_new], axis=2)
+
+            # Evict exactly 1 frame at index sf; extract its special tokens
+            evict_k = k_cat[:, :, sf:sf + 1, :ps, :].reshape(B, H, ps, D)
+            evict_v = v_cat[:, :, sf:sf + 1, :ps, :].reshape(B, H, ps, D)
+
+            # Rotate k_special: drop oldest ps slots, append newest ps tokens
+            new_k_special = mx.concatenate([k_special[:, :, ps:], evict_k], axis=2)
+            new_v_special = mx.concatenate([v_special[:, :, ps:], evict_v], axis=2)
+
+            # Trim cache back to sf + sw frames
+            new_k_cache = mx.concatenate([k_cat[:, :, :sf], k_cat[:, :, -sw:]], axis=2)
+            new_v_cache = mx.concatenate([v_cat[:, :, :sf], v_cat[:, :, -sw:]], axis=2)
+
+            k_full = mx.concatenate(
+                [new_k_special, new_k_cache.reshape(B, H, -1, D)], axis=2)
+            v_full = mx.concatenate(
+                [new_v_special, new_v_cache.reshape(B, H, -1, D)], axis=2)
+
+            x_out = mx.fast.scaled_dot_product_attention(q, k_full, v_full, scale=scale)
+            x_out = x_out.transpose(0, 2, 1, 3).reshape(B, N, C)
+            return proj_fn(x_out), new_k_cache, new_v_cache, new_k_special, new_v_special
+
+        return mx.compile(_step)
 
     def __call__(self, x: mx.array,
                  kv_cache: Optional[Dict[str, Any]] = None,
@@ -202,6 +251,27 @@ class CausalAttentionMLX(nn.Module):
                  patch_start_idx: int = 6) -> mx.array:
         B, N, C = x.shape
         tokens_per_frame = N // num_frame_per_block
+
+        # --- Steady-state compiled fast path ---
+        # Conditions: single new frame, cache full, k_special at cap, no skip.
+        # All tensor shapes are constant → Metal reuses the compiled program.
+        if (kv_cache is not None and
+                not kv_cache.get("_skip_append", False) and
+                num_frame_per_block == 1 and
+                rope_cos is not None and
+                self.keep_special and
+                self.max_special_tokens is not None and
+                kv_cache.get("k") is not None and
+                kv_cache["k"].shape[2] == self.scale_frames + self.sliding_window and
+                kv_cache.get("k_special") is not None and
+                kv_cache["k_special"].shape[2] == self.max_special_tokens):
+            if self._steady_fn is None:
+                self._steady_fn = self._make_steady_fn(tokens_per_frame, patch_start_idx)
+            x_out, kv_cache["k"], kv_cache["v"], kv_cache["k_special"], kv_cache["v_special"] = \
+                self._steady_fn(x, kv_cache["k"], kv_cache["v"],
+                                kv_cache["k_special"], kv_cache["v_special"],
+                                rope_cos, rope_sin)
+            return x_out
 
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim)
         qkv = qkv.transpose(0, 2, 3, 1, 4)  # [B, 3, H, N, D]
