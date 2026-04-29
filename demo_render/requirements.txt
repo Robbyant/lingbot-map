@@ -1,0 +1,18 @@
+# Core
+numpy==1.26.4
+opencv-python==4.11.0.86
+open3d==0.19.0
+tqdm==4.67.1
+pyyaml==6.0.2
+onnxruntime-gpu==1.23.2
+
+# ---------------------------------------------------------------
+# The following packages require matching CUDA / PyTorch versions
+# and should be installed separately — see README for instructions.
+#
+#   torch          (with CUDA)
+#   kaolin         (NVIDIA Kaolin, must match torch + CUDA)
+#
+# System dependency:
+#   ffmpeg         (apt install ffmpeg / brew install ffmpeg)
+# ---------------------------------------------------------------

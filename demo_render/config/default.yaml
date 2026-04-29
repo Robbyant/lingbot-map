@@ -1,0 +1,54 @@
+scene:
+  voxel_size: 0.001
+  octree_level: 16
+  max_depth: 100.0
+  downsample: 2
+  color_update: first
+  jitter: true
+
+preprocess:
+  mask_sky: false
+  sky_model: skyseg_batch.onnx
+  sky_batch_size: 32
+  conf_threshold: 0.0
+  vis_threshold: 4.0
+
+camera:
+  fov: 60.0
+  transition: 30
+
+render:
+  width: 1920
+  height: 1080
+  point_size: 1.0
+  near: 0.1
+  far: 100.0
+  background: black
+  depth_video: false
+  depth_colormap: turbo
+  depth_percentile_lo: 1.0
+  depth_percentile_hi: 99.0
+  # EDL (Eye-Dome Lighting) post-processing — adds depth cues without normals
+  # edl: false
+  # edl_strength: 0.5    # darkening intensity (0.1–1.0)
+  # edl_radius: 2        # neighbour sampling distance in pixels (1–4)
+
+overlay:
+  camera_vis: "default"
+  trail_color_ramp: cyan_blue
+  trail_line_width: 2.0
+  trail_tail_len: 50
+  head_num_frames: 8
+  head_frustum_scale: 0.05
+  frame_tag: false
+  frame_tag_position: top_left
+
+pipeline:
+  fps: 30
+  num_workers: 16
+  fast_review: 200
+
+gpu:
+  build_batch_size: 0
+  cull_chunk_size: 0
+  memory_limit_gb: 0

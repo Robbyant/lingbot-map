@@ -21,6 +21,7 @@ Usage:
 import argparse
 import glob
 import os
+import tempfile
 import time
 
 # Must be set before `import torch` / any CUDA init. Reduces the reserved-vs-allocated
@@ -31,6 +32,7 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 import cv2
 import numpy as np
 import torch
+from PIL import Image
 from tqdm.auto import tqdm
 
 from lingbot_map.utils.pose_enc import pose_encoding_to_extri_intri
@@ -42,8 +44,9 @@ from lingbot_map.utils.load_fn import load_and_preprocess_images
 # Image loading
 # =============================================================================
 
-def load_images(image_folder=None, video_path=None, fps=10, image_ext=".jpg,.png",
-                first_k=None, stride=1, image_size=518, patch_size=14, num_workers=8):
+def load_images(image_folder=None, video_path=None, fps=10, image_ext=".jpg,.png,.JPG",
+                first_k=None, stride=1, image_size=518, patch_size=14, num_workers=8,
+                rotate_clockwise_90=False):
     """Load images from folder or video and preprocess into a tensor.
 
     Returns:
@@ -87,6 +90,18 @@ def load_images(image_folder=None, video_path=None, fps=10, image_ext=".jpg,.png
         paths = paths[:first_k]
     if stride > 1:
         paths = paths[::stride]
+
+    if rotate_clockwise_90:
+        rotated_dir = tempfile.mkdtemp(prefix="lingbot_rot_cw90_")
+        rotated_paths = []
+        # Image.ROTATE_270 = lossless 90° clockwise (270° counter-clockwise) reordering.
+        for p in tqdm(paths, desc="Rotating images 90° CW"):
+            out_path = os.path.join(rotated_dir, os.path.basename(p))
+            Image.open(p).transpose(Image.ROTATE_270).save(out_path)
+            rotated_paths.append(out_path)
+        paths = rotated_paths
+        resolved_folder = rotated_dir
+        print(f"Rotated {len(paths)} images 90° clockwise → {rotated_dir}")
 
     print(f"Loading {len(paths)} images...")
     images = load_and_preprocess_images(
@@ -300,6 +315,9 @@ def main():
     parser.add_argument("--fps", type=int, default=10)
     parser.add_argument("--first_k", type=int, default=None)
     parser.add_argument("--stride", type=int, default=1)
+    parser.add_argument("--rotate_clockwise_90", action="store_true",
+                        help="Rotate source images 90° clockwise before preprocessing "
+                             "(crop/resize then operates on the rotated aspect ratio)")
 
     # Model
     parser.add_argument("--model_path", type=str, required=True)
@@ -344,6 +362,11 @@ def main():
     parser.add_argument("--window_size", type=int, default=64, help="Frames per window (windowed mode)")
     parser.add_argument("--overlap_size", type=int, default=16,
                         help="Overlap between windows in *actual frames*")
+    parser.add_argument("--overlap_keyframes", type=int, default=None,
+                        help="Overlap expressed in *keyframes* (takes precedence over "
+                             "--overlap_size). Converted internally to "
+                             "max(num_scale_frames, overlap_keyframes * keyframe_interval) "
+                             "actual frames.  Recommended when --keyframe_interval > 1.")
 
     # Visualization
     parser.add_argument("--port", type=int, default=8080)
@@ -370,6 +393,7 @@ def main():
         image_folder=args.image_folder, video_path=args.video_path,
         fps=args.fps, first_k=args.first_k, stride=args.stride,
         image_size=args.image_size, patch_size=args.patch_size,
+        rotate_clockwise_90=args.rotate_clockwise_90,
     )
 
     # Export preprocessed images if requested
@@ -486,6 +510,7 @@ def main():
                 images,
                 window_size=args.window_size,
                 overlap_size=args.overlap_size,
+                overlap_keyframes=args.overlap_keyframes,
                 num_scale_frames=args.num_scale_frames,
                 keyframe_interval=args.keyframe_interval,
                 output_device=output_device

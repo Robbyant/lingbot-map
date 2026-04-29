@@ -7,7 +7,7 @@
 from concurrent.futures import ThreadPoolExecutor
 
 import torch
-from PIL import Image
+from PIL import Image, ImageOps
 from torchvision import transforms as TF
 from tqdm.auto import tqdm
 import numpy as np
@@ -42,6 +42,10 @@ def load_and_preprocess_images_square(image_path_list, target_size=1024):
     for image_path in image_path_list:
         # Open image
         img = Image.open(image_path)
+        # Apply EXIF orientation so portrait photos (e.g. Orientation=6/8 from
+        # most cameras and phones) are rotated to their displayed orientation
+        # before any resize/crop. No-op when EXIF is absent.
+        img = ImageOps.exif_transpose(img)
 
         # If there's an alpha channel, blend onto white background
         if img.mode == "RGBA":
@@ -140,6 +144,10 @@ def load_and_preprocess_images(image_path_list, fx=None, fy=None, cx=None, cy=No
     def _load_one(idx_path):
         i, image_path = idx_path
         img = Image.open(image_path)
+        # Honor EXIF orientation (Sony / iPhone portrait shots store landscape
+        # pixels + Orientation=6/8); without this the resize/crop below sees
+        # raw landscape pixels and outputs a landscape frame.
+        img = ImageOps.exif_transpose(img)
         if img.mode == "RGBA":
             background = Image.new("RGBA", img.size, (255, 255, 255, 255))
             img = Image.alpha_composite(background, img)

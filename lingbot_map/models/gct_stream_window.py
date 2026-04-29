@@ -507,6 +507,10 @@ class GCTStream(GCTBase):
             images = images.unsqueeze(0)
         B, S, C, H, W = images.shape
 
+        # Slice-then-move per iteration so `images` may live on CPU and we
+        # keep peak GPU memory at one frame.
+        _model_device = next(self.parameters()).device
+
         # Determine number of scale frames
         scale_frames = num_scale_frames if num_scale_frames is not None else self.num_frame_for_scale
         scale_frames = min(scale_frames, S)  # Cap to available frames
@@ -523,7 +527,7 @@ class GCTStream(GCTBase):
         # Phase 1: Process scale frames together
         # These frames get bidirectional attention among themselves via scale token
         logger.info(f'Processing {scale_frames} scale frames...')
-        scale_images = images[:, :scale_frames]
+        scale_images = images[:, :scale_frames].to(_model_device, non_blocking=True)
         scale_output = self.forward(
             scale_images,
             num_frame_for_scale=scale_frames,
@@ -554,7 +558,7 @@ class GCTStream(GCTBase):
             total=S,
         )
         for i in pbar:
-            frame_image = images[:, i:i+1]
+            frame_image = images[:, i:i+1].to(_model_device, non_blocking=True)
 
             if use_flow_keyframe:
                 # Flow-based: defer eviction, forward, then decide
@@ -760,8 +764,10 @@ class GCTStream(GCTBase):
     ):
         """Compute (scale, R, t) that maps *curr* into *prev*'s coordinate frame.
 
-        Uses the first overlap frame of *curr* and the corresponding trailing
-        frame of *prev* to establish the similarity transform.
+        Anchors on the latest physical time step inside the overlap region
+        that is a keyframe in BOTH windows, and aggregates depth across all
+        such paired keyframes for scale estimation. Falls back to the first
+        overlap frame (legacy behavior) when no keyframe pairing is available.
         """
         unit_s = torch.ones(batch_size, device=device, dtype=dtype)
         eye_R = torch.eye(3, device=device, dtype=dtype).unsqueeze(0).expand(batch_size, -1, -1).clone()
@@ -775,24 +781,52 @@ class GCTStream(GCTBase):
         if pe_prev is None or pe_curr is None:
             return unit_s, eye_R, zero_t
 
-        idx_a = max(pe_prev.shape[1] - overlap, 0)
+        total_prev = pe_prev.shape[1]
+        total_curr = pe_curr.shape[1]
+        start = max(total_prev - overlap, 0)
+        eff_overlap = min(overlap, total_prev - start, total_curr)
+
+        # Pick keyframe-paired offsets inside overlap (keyframe in both windows).
+        is_kf_prev = prev_pred.get("is_keyframe")
+        is_kf_curr = curr_pred.get("is_keyframe")
+        paired_offsets = None
+        if is_kf_prev is not None and is_kf_curr is not None and eff_overlap > 0:
+            kf_prev_tail = is_kf_prev[0, start:start + eff_overlap].to(torch.bool)
+            kf_curr_head = is_kf_curr[0, :eff_overlap].to(torch.bool)
+            paired_mask = kf_prev_tail & kf_curr_head
+            if paired_mask.any():
+                paired_offsets = torch.nonzero(paired_mask, as_tuple=False).flatten().to(device)
+
+        if paired_offsets is not None:
+            anchor_offset = int(paired_offsets[-1].item())
+            idx_a = start + anchor_offset
+            idx_b = anchor_offset
+            prev_depth_idx = start + paired_offsets
+            curr_depth_idx = paired_offsets
+        else:
+            idx_a = start
+            idx_b = 0
+            prev_depth_idx = torch.tensor([idx_a], device=device, dtype=torch.long)
+            curr_depth_idx = torch.tensor([0], device=device, dtype=torch.long)
 
         # Decompose C2W: center ([:3]) + quaternion ([3:7])
         Ra = quat_to_mat(pe_prev[:, idx_a, 3:7])   # (B, 3, 3)
         ca = pe_prev[:, idx_a, :3]                  # (B, 3)
-        Rb = quat_to_mat(pe_curr[:, 0, 3:7])
-        cb = pe_curr[:, 0, :3]
+        Rb = quat_to_mat(pe_curr[:, idx_b, 3:7])
+        cb = pe_curr[:, idx_b, :3]
 
         R_ab = torch.bmm(Ra, Rb.transpose(1, 2))    # Ra = R_ab @ Rb
 
-        # Scale from depth
+        # Scale from depth — aggregate across all paired keyframes in overlap.
         s_ab = unit_s.clone()
         da = prev_pred.get("depth")
         db = curr_pred.get("depth")
         if (da is not None and db is not None
-                and da.shape[1] > idx_a and db.shape[1] > 0):
+                and int(prev_depth_idx.max().item()) < da.shape[1]
+                and int(curr_depth_idx.max().item()) < db.shape[1]):
             s_ab = GCTStream._depth_ratio_scale(
-                da[:, idx_a, ..., 0], db[:, 0, ..., 0],
+                da[:, prev_depth_idx, ..., 0],
+                db[:, curr_depth_idx, ..., 0],
                 batch_size, device,
             ).to(dtype)
 
@@ -927,6 +961,7 @@ class GCTStream(GCTBase):
         images: torch.Tensor,
         window_size: int = 16,
         overlap_size: Optional[int] = None,
+        overlap_keyframes: Optional[int] = None,
         num_scale_frames: Optional[int] = None,
         scale_mode: str = 'median',
         output_device: Optional[torch.device] = None,
@@ -952,8 +987,17 @@ class GCTStream(GCTBase):
             images: Input images [S, 3, H, W] or [B, S, 3, H, W] in [0, 1].
             window_size: Number of **keyframes** per window (including scale
                 frames).  Directly controls KV cache memory.
-            overlap_size: Number of overlapping frames between windows.
-                Defaults to ``num_scale_frames`` (overlap = scale frames).
+            overlap_size: Number of overlapping **actual frames** between
+                windows.  Defaults to ``num_scale_frames`` (overlap = scale
+                frames).  Ignored when ``overlap_keyframes`` is provided.
+            overlap_keyframes: Overlap expressed in **keyframes** (takes
+                precedence over ``overlap_size``).  Internally converted to
+                ``max(num_scale_frames, overlap_keyframes * keyframe_interval)``
+                so the overlap region always spans at least that many keyframe
+                intervals and is large enough to host the next window's scale
+                phase.  Use this when ``keyframe_interval > 1`` to guarantee
+                the pairwise alignment has at least one paired keyframe and
+                that the depth-ratio scale is computed across keyframe pairs.
             num_scale_frames: Number of frames used as scale reference within
                 each window.  Defaults to ``self.num_frame_for_scale``.
             scale_mode: Scale estimation strategy for alignment.
@@ -976,13 +1020,28 @@ class GCTStream(GCTBase):
             images = images.unsqueeze(0)
         B, S, C, H, W = images.shape
 
+        # Slice-then-move per iteration so `images` may live on CPU and we
+        # keep peak GPU memory at one window (not the full sequence).
+        _model_device = next(self.parameters()).device
+
         ws = (num_scale_frames if num_scale_frames is not None
               else self.num_frame_for_scale)
         ws = min(ws, S)
 
-        # overlap = scale_frames by default
-        eff_overlap = min(overlap_size if overlap_size is not None else ws,
-                          S - 1) if S > 1 else 0
+        # Resolve overlap in *actual frames*.  Priority:
+        #   1. overlap_keyframes (preferred; converted via keyframe_interval)
+        #   2. overlap_size (legacy, already in actual frames)
+        #   3. default = num_scale_frames
+        # overlap_keyframes is clamped up to ``ws`` because the next window's
+        # scale phase needs at least ``ws`` overlapping frames to work.
+        if overlap_keyframes is not None:
+            kf = max(keyframe_interval, 1)
+            eff_overlap = max(ws, overlap_keyframes * kf)
+        elif overlap_size is not None:
+            eff_overlap = overlap_size
+        else:
+            eff_overlap = ws
+        eff_overlap = min(eff_overlap, S - 1) if S > 1 else 0
 
         def _to_out(t: torch.Tensor) -> torch.Tensor:
             return t.to(output_device) if output_device is not None else t
@@ -1038,7 +1097,9 @@ class GCTStream(GCTBase):
                 self.clean_kv_cache()
 
                 # ---------- Phase 1: scale frames ----------
-                scale_images = images[:, cursor:cursor + window_scale]
+                scale_images = images[:, cursor:cursor + window_scale].to(
+                    _model_device, non_blocking=True
+                )
                 scale_out = self.forward(
                     scale_images,
                     num_frame_for_scale=window_scale,
@@ -1062,7 +1123,9 @@ class GCTStream(GCTBase):
                 kf_count = 0
 
                 while cursor < S and kf_count < target_kf:
-                    frame_image = images[:, cursor:cursor + 1]
+                    frame_image = images[:, cursor:cursor + 1].to(
+                        _model_device, non_blocking=True
+                    )
 
                     self._set_defer_eviction(True)
                     frame_out = self.forward(
@@ -1143,7 +1206,12 @@ class GCTStream(GCTBase):
 
             all_window_predictions: List[Dict] = []
             for start, end in tqdm(windows, desc='Windowed inference'):
-                window_images = images[:, start:end]
+                # Slice on whichever device `images` lives on, then move just
+                # this window to the model device.  Keeps peak memory at one
+                # window instead of the full sequence.
+                window_images = images[:, start:end].to(
+                    _model_device, non_blocking=True
+                )
                 window_len = end - start
 
                 # Fresh KV cache

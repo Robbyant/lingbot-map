@@ -1,0 +1,61 @@
+scene:
+  voxel_size: 0.003
+  octree_level: 16
+  max_depth: 250.0
+  downsample: 2
+  color_update: first
+  jitter: true
+
+preprocess:
+  mask_sky: true
+  sky_model: skyseg_batch.onnx
+  sky_batch_size: 64
+  conf_threshold: 0.0
+  vis_threshold: 1.3
+
+camera:
+  fov: 60.0
+  transition: 40
+  segments:
+    - mode: follow
+      frames: [0, 750]
+      back_offset: 0.2
+      up_offset: 0.05
+      look_offset: 0.5
+      smooth_window: 60
+      scale_frames: 100
+    - mode: birdeye              # 升到空中俯瞰全貌
+      frames: [750, -1]
+      reveal_height_mult: 2.5
+
+render:
+  width: 1920
+  height: 1080
+  point_size: 0.5
+  near: 0.1
+  far: 200.0
+  background: '#2b2b2b'
+  depth_video: false
+  depth_colormap: turbo
+  depth_percentile_lo: 1.0
+  depth_percentile_hi: 99.0
+  edl: false
+  edl_strength: 0.2
+  edl_radius: 3
+
+overlay:
+  camera_vis: "default"
+  trail_color_ramp: cyan_blue
+  head_num_frames: 8
+  frame_tag: false
+  frame_tag_position: top_left
+
+pipeline:
+  fps: 30
+  num_workers: 4
+  fast_review: 0
+
+gpu:
+  build_batch_size: 4
+  cull_chunk_size: 0
+  memory_limit_gb: 30
