@@ -297,36 +297,65 @@ class _FeatureFusionBlock(nn.Module):
         return x
 
 
+_bilinear_grid_cache: Dict[tuple, tuple] = {}
+
 def _bilinear(x: mx.array, hw: Tuple[int, int], align_corners: bool = True) -> mx.array:
-    """Bilinear resize [B, H, W, C] → [B, h, w, C]."""
+    """Bilinear resize [B, H, W, C] → [B, h, w, C].
+
+    Indices and weights are precomputed with numpy on first call for each
+    (H, W, h, w) pair and cached as concrete MLX arrays, avoiding redundant
+    lazy-graph nodes on every frame and halving the number of gather ops via
+    2D broadcast indexing.
+    """
     B, H, W, C = x.shape
     h, w = hw
     if (h, w) == (H, W):
         return x
 
-    if align_corners:
-        y_src = mx.arange(h, dtype=mx.float32) * ((H - 1) / max(h - 1, 1))
-        x_src = mx.arange(w, dtype=mx.float32) * ((W - 1) / max(w - 1, 1))
-    else:
-        y_src = (mx.arange(h, dtype=mx.float32) + 0.5) * (H / h) - 0.5
-        x_src = (mx.arange(w, dtype=mx.float32) + 0.5) * (W / w) - 0.5
+    key = (H, W, h, w, align_corners)
+    if key not in _bilinear_grid_cache:
+        if align_corners:
+            y_src = np.arange(h, dtype=np.float32) * ((H - 1) / max(h - 1, 1))
+            x_src = np.arange(w, dtype=np.float32) * ((W - 1) / max(w - 1, 1))
+        else:
+            y_src = (np.arange(h, dtype=np.float32) + 0.5) * (H / h) - 0.5
+            x_src = (np.arange(w, dtype=np.float32) + 0.5) * (W / w) - 0.5
 
-    y0 = mx.clip(mx.floor(y_src).astype(mx.int32), 0, H - 1)
-    y1 = mx.clip(y0 + 1, 0, H - 1)
-    x0 = mx.clip(mx.floor(x_src).astype(mx.int32), 0, W - 1)
-    x1 = mx.clip(x0 + 1, 0, W - 1)
+        y0 = np.clip(np.floor(y_src).astype(np.int32), 0, H - 1)
+        y1 = np.clip(y0 + 1, 0, H - 1)
+        x0 = np.clip(np.floor(x_src).astype(np.int32), 0, W - 1)
+        x1 = np.clip(x0 + 1, 0, W - 1)
 
-    wy1 = (y_src - mx.floor(y_src)).reshape(1, h, 1, 1).astype(x.dtype)
-    wx1 = (x_src - mx.floor(x_src)).reshape(1, 1, w, 1).astype(x.dtype)
-    wy0 = 1.0 - wy1
-    wx0 = 1.0 - wx1
+        wy1 = (y_src - np.floor(y_src)).reshape(1, h, 1, 1).astype(np.float32)
+        wx1 = (x_src - np.floor(x_src)).reshape(1, 1, w, 1).astype(np.float32)
 
-    q00 = x[:, y0, :, :][:, :, x0, :]   # [B, h, w, C]
-    q01 = x[:, y0, :, :][:, :, x1, :]
-    q10 = x[:, y1, :, :][:, :, x0, :]
-    q11 = x[:, y1, :, :][:, :, x1, :]
+        # Flat 1D indices into H*W — MLX supports 1D fancy indexing reliably.
+        # Precomputed as numpy; shape [h*w] so x.reshape(B, H*W, C)[:, flat, :]
+        # produces [B, h*w, C] with no intermediate [B, h, W, C] tensor.
+        flat_00 = (y0[:, None] * W + x0[None, :]).reshape(-1)
+        flat_01 = (y0[:, None] * W + x1[None, :]).reshape(-1)
+        flat_10 = (y1[:, None] * W + x0[None, :]).reshape(-1)
+        flat_11 = (y1[:, None] * W + x1[None, :]).reshape(-1)
 
-    return q00 * wy0 * wx0 + q01 * wy0 * wx1 + q10 * wy1 * wx0 + q11 * wy1 * wx1
+        _bilinear_grid_cache[key] = (
+            mx.array(flat_00), mx.array(flat_01),           # MLX int32 [h*w]
+            mx.array(flat_10), mx.array(flat_11),
+            mx.array(1.0 - wy1), mx.array(1.0 - wx1),      # wy0, wx0 as MLX float32
+            mx.array(wy1),        mx.array(wx1),             # wy1, wx1 as MLX float32
+        )
+
+    flat_00, flat_01, flat_10, flat_11, wy0, wx0, wy1, wx1 = _bilinear_grid_cache[key]
+
+    wy0 = wy0.astype(x.dtype); wx0 = wx0.astype(x.dtype)
+    wy1 = wy1.astype(x.dtype); wx1 = wx1.astype(x.dtype)
+
+    x_flat = x.reshape(B, H * W, C)
+    q00 = x_flat[:, flat_00, :].reshape(B, h, w, C)
+    q01 = x_flat[:, flat_01, :].reshape(B, h, w, C)
+    q10 = x_flat[:, flat_10, :].reshape(B, h, w, C)
+    q11 = x_flat[:, flat_11, :].reshape(B, h, w, C)
+
+    return (q00 * wy0 + q10 * wy1) * wx0 + (q01 * wy0 + q11 * wy1) * wx1
 
 
 # ---------------------------------------------------------------------------
