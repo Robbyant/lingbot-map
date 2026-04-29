@@ -89,6 +89,69 @@ pip install --index-url https://pypi.org/simple flashinfer-python
 pip install -e ".[vis]"
 ```
 
+## Docker / Docker Compose
+
+If you want a quick, reproducible runtime environment (CUDA + dependencies, with optional FlashInfer), you can use the provided [Dockerfile](Dockerfile) and [docker-compose.yml](docker-compose.yml).
+
+### Prerequisites
+
+- Install Docker Desktop (or Docker Engine on Linux).
+- For GPU support:
+  - Linux: install the NVIDIA driver + [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
+  - Windows: use the WSL2 backend and make sure `nvidia-smi` works inside WSL
+
+### Build and enter the container
+
+```bash
+docker compose build
+docker compose run --rm --service-ports lingbot-map
+```
+
+Inside the container (default working directory is `/workspace`, and the repo is mounted via a volume), run the demo:
+
+```bash
+python demo.py --model_path /path/to/lingbot-map-long.pt \
+    --image_folder example/church --mask_sky
+```
+
+Open `http://localhost:8080` in your browser (compose maps `8080:8080`).
+
+### Exit and cleanup
+
+```bash
+exit
+docker compose down
+```
+
+(Optional) This compose persists HuggingFace and Torch caches in named volumes: `hf_cache`, `torch_cache`. To remove them:
+
+```bash
+docker volume rm lingbot-map_hf_cache lingbot-map_torch_cache
+```
+
+### Adjust for your CUDA version
+
+The current [Dockerfile](Dockerfile) uses a base image and FlashInfer wheel for **CUDA 13.0** (`cuda13.0.2` / `cu130`). If your machine/driver environment is better matched with CUDA 12.x (more common), update both of the following accordingly:
+
+1) Update the CUDA version in the Docker base image (`FROM ...cudaXX...` on line 1 of `Dockerfile`)
+
+2) Update the FlashInfer wheel index URL (the `--index-url https://flashinfer.ai/whl/cuXXX` line in `Dockerfile`)
+
+Example: switch to **CUDA 12.8** (illustrative; choose a base image and FlashInfer wheel that match your actual PyTorch/CUDA setup)
+
+```diff
+-FROM spxiong/pytorch:2.11.0-py3.10.19-cuda13.0.2-ubuntu22.04
++FROM spxiong/pytorch:2.11.0-py3.10.19-cuda12.8.0-ubuntu22.04
+-RUN python -m pip install --no-cache-dir flashinfer-jit-cache --index-url https://flashinfer.ai/whl/cu130 --no-deps || true
++RUN python -m pip install --no-cache-dir flashinfer-jit-cache --index-url https://flashinfer.ai/whl/cu128 --no-deps || true
+```
+
+
+Notes:
+
+- In `docker-compose.yml`, `gpus: all` exposes all visible GPUs to the container. If you want to use only one GPU, limit the exposed device(s) (syntax varies across Docker/Compose versions).
+- You may need to change the Ubuntu apt mirror depending on your network environment. `Dockerfile` supports the `UBUNTU_MIRROR` build arg (defaults to Aliyun mirrors).
+
 # 📦 Model Download
 
 | Model Name | Huggingface Repository | ModelScope Repository | Description |

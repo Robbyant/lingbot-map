@@ -1,0 +1,24 @@
+services:
+  lingbot-map:
+    build:
+      context: .
+    image: lingbot-map:dev
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+      - hf_cache:/root/.cache/huggingface
+      - torch_cache:/root/.cache/torch
+    environment:
+      - HF_HOME=/root/.cache/huggingface
+      - TORCH_HOME=/root/.cache/torch
+    ports:
+      - "8080:8080"
+    gpus: all
+    shm_size: "32gb"
+    stdin_open: true
+    tty: true
+    command: bash
+
+volumes:
+  hf_cache:
+  torch_cache:
