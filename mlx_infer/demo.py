@@ -176,9 +176,6 @@ def main():
 
     # ---- Build model ----
     print("Building GCTStreamMLX model...")
-    tokens_per_frame = (args.img_size // 14) ** 2 + 6
-    print(f"KV-cache: scale={args.scale_frames} + sliding={args.kv_sliding_window} frames "
-          f"= {(args.scale_frames + args.kv_sliding_window) * tokens_per_frame:,} keys/block")
     model = GCTStreamMLX(
         img_size=args.img_size,
         patch_size=14,
@@ -201,7 +198,11 @@ def main():
     # ---- Load images ----
     print(f"Loading images from: {args.images}")
     images_np = _load_images_from_dir(args.images, img_size=args.img_size)
-    print(f"Loaded {images_np.shape[0]} frames at {images_np.shape[2]}×{images_np.shape[3]}")
+    H, W = images_np.shape[2], images_np.shape[3]
+    tokens_per_frame = (H // 14) * (W // 14) + 6
+    print(f"Loaded {images_np.shape[0]} frames at {H}×{W}")
+    print(f"KV-cache: scale={args.scale_frames} + sliding={args.kv_sliding_window} frames "
+          f"= {(args.scale_frames + args.kv_sliding_window) * tokens_per_frame:,} keys/block")
 
     if args.max_frames is not None:
         images_np = images_np[:args.max_frames]
