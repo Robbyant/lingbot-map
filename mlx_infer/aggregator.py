@@ -401,9 +401,6 @@ class AggregatorMLX(nn.Module):
 
         # ---- DINOv2 patch embedding ----
         patch_tokens = self.patch_embed(imgs)                # [B*S, N_patch, C]
-        # Materialise the backbone before frame/global blocks so MLX compiles
-        # two smaller subgraphs rather than one 72-block graph per frame.
-        mx.eval(patch_tokens)
         C = patch_tokens.shape[-1]
 
         # ---- Special tokens ----
