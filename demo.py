@@ -21,13 +21,22 @@ Usage:
 import argparse
 import glob
 import os
+import sys
 import tempfile
 import time
 
 # Must be set before `import torch` / any CUDA init. Reduces the reserved-vs-allocated
 # memory gap by letting the caching allocator grow segments on demand instead of
 # pre-reserving fixed-size blocks.
-os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+#
+# Caveat: `expandable_segments:True` is **incompatible** with torch.compile's
+# `cudagraph_trees` (PyTorch ≤2.8) — checkpoint pool state restore assumes the
+# classic fixed-segment topology, and trips
+# `RuntimeError: Expected curr_block->next == nullptr` during compiled warmup
+# / replay. So when `--compile` is requested we skip the env override and let
+# the default allocator run.
+if "--compile" not in sys.argv:
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import cv2
 import numpy as np
@@ -177,14 +186,33 @@ def compile_model(model):
         b.attn.proj = torch.compile(b.attn.proj, mode="reduce-overhead")
 
 
-def _warm_streaming(model, images, scale_frames, warm_stream_n, dtype, passes=1):
+def _warm_streaming(model, images, scale_frames, warm_stream_n, dtype,
+                    passes=1, keyframe_interval=1):
     """Drive `clean_kv_cache → Phase 1 → N streaming forwards` `passes` times.
 
-    Warmup inputs are sliced from the already-preprocessed `images` tensor, so their
-    spatial shape matches what real inference will feed — this is what makes the
-    captured CUDA graphs reusable (reduce-overhead mode keys on shape).
+    Warmup inputs are sliced from the already-preprocessed ``images`` tensor, so
+    their **spatial shape (H×W) and number of scale frames adapt to the user's
+    input** — this is what makes the captured CUDA graphs match what
+    ``inference_streaming`` will replay (reduce-overhead mode keys on shape).
+
+    The streaming loop alternates keyframe / non-keyframe forwards according to
+    ``keyframe_interval``, mirroring ``inference_streaming``'s call pattern so
+    the ``skip_append`` (defer+append+attend+rollback) path is also captured
+    during warmup.  Without this, the first non-keyframe in the real run hits
+    cold orchestration code and can confuse cudagraph_trees' allocator
+    checkpoint state.
     """
-    # images: [S, 3, H, W] on device already; slice and add batch dim.
+    num_avail = int(images.shape[0])
+    scale_frames = max(1, min(int(scale_frames), num_avail))
+    # Keep at least one streaming frame for the per-frame compile path; if the
+    # user supplied <= scale_frames images, shrink scale to free a stream slot.
+    if scale_frames >= num_avail:
+        scale_frames = max(1, num_avail - 1)
+    warm_stream_n = max(1, min(int(warm_stream_n), num_avail - scale_frames))
+    kf_int = max(int(keyframe_interval), 1)
+
+    # images: [S, 3, H, W] on device already; slice + add batch dim, no copy of
+    # spatial dims so warmup shape == real inference shape (H, W).
     warm_scale = images[:scale_frames].unsqueeze(0).to(dtype)
     warm_stream = images[scale_frames:scale_frames + warm_stream_n].unsqueeze(0).to(dtype)
 
@@ -199,6 +227,9 @@ def _warm_streaming(model, images, scale_frames, warm_stream_n, dtype, passes=1)
                 causal_inference=True,
             )
         for i in range(warm_stream_n):
+            is_keyframe = (kf_int <= 1) or (i % kf_int == 0)
+            if not is_keyframe:
+                model._set_skip_append(True)
             torch.compiler.cudagraph_mark_step_begin()
             with torch.no_grad(), torch.amp.autocast("cuda", dtype=dtype):
                 model.forward(
@@ -207,6 +238,8 @@ def _warm_streaming(model, images, scale_frames, warm_stream_n, dtype, passes=1)
                     num_frame_per_block=1,
                     causal_inference=True,
                 )
+            if not is_keyframe:
+                model._set_skip_append(False)
     if torch.cuda.is_available():
         torch.cuda.synchronize()
     # Wipe warmup KV so real inference_streaming starts clean (it also calls
@@ -474,10 +507,19 @@ def main():
             )
         else:
             scale_for_warm = min(args.num_scale_frames, num_frames)
+            if scale_for_warm >= num_frames:
+                scale_for_warm = max(1, num_frames - 1)
             warm_stream_n = min(10, max(1, num_frames - scale_for_warm))
-            print(f"Warmup eager (scale + {warm_stream_n} streaming)...")
+            warm_h, warm_w = int(images.shape[-2]), int(images.shape[-1])
+            print(
+                f"Warmup eager (scale={scale_for_warm} + {warm_stream_n} streaming, "
+                f"shape={warm_h}x{warm_w}, kf_int={args.keyframe_interval})..."
+            )
             t_warm = time.time()
-            _warm_streaming(model, images, scale_for_warm, warm_stream_n, dtype, passes=1)
+            _warm_streaming(
+                model, images, scale_for_warm, warm_stream_n, dtype,
+                passes=1, keyframe_interval=args.keyframe_interval,
+            )
             print(f"  eager warmup: {time.time() - t_warm:.1f}s")
 
             print("Compiling hot modules...")
@@ -488,7 +530,10 @@ def main():
             # real inference will see. See gct_profile.py:302-306 for rationale.
             print("Warmup compiled (3x dress rehearsal)...")
             t_warm = time.time()
-            _warm_streaming(model, images, scale_for_warm, warm_stream_n, dtype, passes=3)
+            _warm_streaming(
+                model, images, scale_for_warm, warm_stream_n, dtype,
+                passes=3, keyframe_interval=args.keyframe_interval,
+            )
             print(f"  compiled warmup: {time.time() - t_warm:.1f}s")
 
     # ── Inference ────────────────────────────────────────────────────────────

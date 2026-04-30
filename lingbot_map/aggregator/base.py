@@ -118,7 +118,6 @@ class AggregatorBase(nn.Module, ABC):
         self.use_reentrant = use_reentrant
         self.use_gradient_checkpoint = use_gradient_checkpoint
         self.pretrained_path = pretrained_path
-        self.enable_ulysses_cp = False  # CP disabled
 
         print("pretrained_path:", self.pretrained_path)
 
@@ -490,11 +489,10 @@ class AggregatorBase(nn.Module, ABC):
                     self.frame_blocks[frame_idx],
                     tokens,
                     pos,
-                    False,  # enable_ulysses_cp (always False)
                     use_reentrant=self.use_reentrant
                 )
             else:
-                tokens = self.frame_blocks[frame_idx](tokens, pos=pos, enable_ulysses_cp=False)
+                tokens = self.frame_blocks[frame_idx](tokens, pos=pos)
 
             frame_idx += 1
             intermediates.append(tokens.view(B, S, P, C))

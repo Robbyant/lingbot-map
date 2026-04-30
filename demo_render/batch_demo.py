@@ -455,7 +455,7 @@ def run_inference(model, images, args):
         autocast_ctx = torch.amp.autocast("cuda", dtype=dtype)
         images_device = images.device.type
         print(f"Running {args.mode} inference (dtype={dtype}, "
-              f"images on {images_device})...")
+            f"images on {images_device})...")
     else:
         print(f"Running {args.mode} inference on CPU...")
 

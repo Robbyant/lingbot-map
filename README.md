@@ -287,19 +287,6 @@ python demo.py --model_path /path/to/checkpoint.pt \
 
 ### Performance & Memory
 
-#### `torch.compile` (`--compile`)
-
-Pass `--compile` to wrap the streaming forward pass in `torch.compile`, which fuses kernels and replays CUDA graphs for a measurable speedup on long sequences.
-
-```bash
-python demo.py --model_path /path/to/lingbot-map-long.pt \
-    --image_folder /path/to/images/ --compile
-```
-
-- **Streaming mode only.** `--compile` is rejected for `--mode windowed`; use the streaming path for compiled runs.
-- **First frame is slow** — `torch.compile` traces and tunes kernels on warmup; per-frame latency drops sharply once the cache is hot.
-- **Benchmarking.** `gct_profile.py --backend flashinfer --dtype bf16 --compile` reports per-frame ms and is the recommended way to verify the speedup on your hardware.
-
 #### Without FlashInfer (SDPA fallback)
 
 ```bash
