@@ -307,6 +307,26 @@ class AggregatorMLX(nn.Module):
         pos_special = mx.zeros((B * S, self.num_special_tokens, 2), dtype=mx.int32)
         return mx.concatenate([pos_special, pos], axis=1)  # [B*S, P, 2]
 
+    def _get_rope(self, B: int, S: int, H: int, W: int,
+                  head_dim: int, dtype) -> tuple:
+        """Return (cos, sin) RoPE tables, cached per (B, S, H, W, head_dim, dtype).
+
+        The patch positions are purely a function of the image grid, so they are
+        identical for every frame of the same resolution. Computing them once and
+        caching avoids repeated calls to get_cos_sin and two .astype() casts.
+        """
+        key = (B, S, H, W, head_dim, dtype)
+        if not hasattr(self, '_rope_cache'):
+            self._rope_cache: dict = {}
+        if key not in self._rope_cache:
+            pos = self._get_positions(B, S, H, W)
+            cos, sin = self.rope.get_cos_sin(None, pos, head_dim=head_dim)
+            cos = cos.astype(dtype)
+            sin = sin.astype(dtype)
+            mx.eval(cos, sin)
+            self._rope_cache[key] = (cos, sin)
+        return self._rope_cache[key]
+
     # ------------------------------------------------------------------
     # Special token preparation
     # ------------------------------------------------------------------
@@ -394,14 +414,9 @@ class AggregatorMLX(nn.Module):
         tokens = mx.concatenate([special, patch_tokens], axis=1)  # [B*S, P, C]
         P = tokens.shape[1]
 
-        # ---- 2D RoPE positions ----
-        pos = self._get_positions(B, S, H, W)                # [B*S, P, 2]
+        # ---- 2D RoPE positions (cached — constant per image resolution) ----
         head_dim = self.embed_dim // self.num_heads          # 64 for ViT-L
-        cos, sin = self.rope.get_cos_sin(
-            None, pos, head_dim=head_dim)                    # [B*S, 1, P, 64]
-        # Cast to compute dtype so float16 Q/K aren't silently upcast by float32 tables.
-        cos = cos.astype(tokens.dtype)
-        sin = sin.astype(tokens.dtype)
+        cos, sin = self._get_rope(B, S, H, W, head_dim, tokens.dtype)
 
         # ---- Alternating frame / global attention ----
         output_list: List[mx.array] = []
@@ -446,9 +461,10 @@ class AggregatorMLX(nn.Module):
             if selected_idx is None or group in selected_idx:
                 for fi, gi in zip(frame_outs, global_outs):
                     output_list.append(mx.concatenate([fi, gi], axis=-1))  # [B, S, P, 2C]
-                # Break the lazy graph: forces this segment to execute and lets the
-                # next segment compile independently (~6 blocks per segment).
-                mx.eval(tokens_global)
+                # Note: we no longer call mx.eval(tokens_global) here. With compiled
+                # steady-state global blocks the full 24-pair lazy graph is smaller
+                # than before, and a single eval via mx.eval(agg_list) in __call__
+                # is ~7ms faster than four intermediate Metal sync points.
 
         # Update frame counter (only on keyframe path, skip_append=False)
         if self._kv_cache is not None and not self._kv_cache[0].get("_skip_append", False):

@@ -216,20 +216,20 @@ class CausalAttentionMLX(nn.Module):
 
             k_new = k.reshape(B, H, 1, tokens_per_frame, D)
             v_new = v.reshape(B, H, 1, tokens_per_frame, D)
-            k_cat = mx.concatenate([k_cache, k_new], axis=2)  # [B, H, sf+sw+1, T, D]
-            v_cat = mx.concatenate([v_cache, v_new], axis=2)
 
-            # Evict exactly 1 frame at index sf; extract its special tokens
-            evict_k = k_cat[:, :, sf:sf + 1, :ps, :].reshape(B, H, ps, D)
-            evict_v = v_cat[:, :, sf:sf + 1, :ps, :].reshape(B, H, ps, D)
+            # Extract evicted frame's special tokens directly from the OLD cache at index sf.
+            # Avoids building the 32 MB k_cat = concat([k_cache, k_new]) intermediate tensor.
+            evict_k = k_cache[:, :, sf:sf + 1, :ps, :].reshape(B, H, ps, D)
+            evict_v = v_cache[:, :, sf:sf + 1, :ps, :].reshape(B, H, ps, D)
 
             # Rotate k_special: drop oldest ps slots, append newest ps tokens
             new_k_special = mx.concatenate([k_special[:, :, ps:], evict_k], axis=2)
             new_v_special = mx.concatenate([v_special[:, :, ps:], evict_v], axis=2)
 
-            # Trim cache back to sf + sw frames
-            new_k_cache = mx.concatenate([k_cat[:, :, :sf], k_cat[:, :, -sw:]], axis=2)
-            new_v_cache = mx.concatenate([v_cat[:, :, :sf], v_cat[:, :, -sw:]], axis=2)
+            # New cache: scale_frames kept + sliding[1:] + new frame (3-way concat).
+            # k_cache[:, :, sf+1:] = sw-1 old sliding frames; k_new = 1 new frame.
+            new_k_cache = mx.concatenate([k_cache[:, :, :sf], k_cache[:, :, sf + 1:], k_new], axis=2)
+            new_v_cache = mx.concatenate([v_cache[:, :, :sf], v_cache[:, :, sf + 1:], v_new], axis=2)
 
             k_full = mx.concatenate(
                 [new_k_special, new_k_cache.reshape(B, H, -1, D)], axis=2)
