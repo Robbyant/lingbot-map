@@ -132,7 +132,6 @@ class GCTStreamMLX(nn.Module):
             num_frame_for_scale=num_frame_for_scale,
             num_frame_per_block=num_frame_per_block,
         )
-        mx.eval(agg_list)   # materialise before heads
 
         predictions: Dict[str, mx.array] = {}
 
