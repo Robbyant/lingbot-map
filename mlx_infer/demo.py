@@ -143,13 +143,16 @@ def main():
     parser.add_argument("--img-size", type=int, default=518,
                         help="Resize images to this square size")
     parser.add_argument("--scale-frames", type=int, default=8,
-                        help="Number of initial scale frames (Phase 1)")
+                        help="Number of initial scale frames (Phase 1). "
+                             "Also a speed lever: reduces permanent KV cache from "
+                             "(sf+sw)*tokens to fewer keys. sf=4 saves ~16%%, sf=1 saves ~29%% "
+                             "vs sf=8 (with sw=16, 294x518px).")
     parser.add_argument("--keyframe-interval", type=int, default=1,
                         help="Keyframe interval (1 = every frame)")
     parser.add_argument("--kv-sliding-window", type=int, default=64,
                         help="KV-cache sliding window in frames. "
-                             "Dominant cost is 24 attn blocks x window*1375 keys per frame. "
-                             "sw=64 (default/accurate), sw=16 (~2.5x faster), sw=8 (~3.3x faster)")
+                             "Dominant cost is 24 attn blocks × (sf+sw)*783 keys (294×518px). "
+                             "sw=64 (default/accurate), sw=16 (~1.9 fps), sw=8 (~2.1 fps) with float16.")
     parser.add_argument("--max-special-frames", type=int, default=None,
                         help="Cap k_special (evicted frames' tokens) at this many frames. "
                              "k_special grows 6 tokens/frame indefinitely; for sequences "
