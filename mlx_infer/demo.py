@@ -144,15 +144,17 @@ def main():
                         help="Resize images to this square size")
     parser.add_argument("--scale-frames", type=int, default=8,
                         help="Number of initial scale frames (Phase 1). "
-                             "Minor speed lever: sf=1 gives ~10%% speedup vs sf=8 "
-                             "(2.09→1.90 fps, sw=16 float16); sf=4 is negligible. "
-                             "Lower values reduce initialization quality.")
+                             "Speed lever: KV cache holds (sf+sw)*783 keys; reducing sf "
+                             "compounds with --kv-sliding-window. sf=1+sw=4 → 2.82fps, "
+                             "sf=1+sw=1 → 3.0fps (vs sf=8+sw=16 → 1.9fps, float16). "
+                             "Lower sf reduces initialization quality.")
     parser.add_argument("--keyframe-interval", type=int, default=1,
                         help="Keyframe interval (1 = every frame)")
     parser.add_argument("--kv-sliding-window", type=int, default=64,
-                        help="KV-cache sliding window in frames. "
-                             "Dominant cost is 24 attn blocks × (sf+sw)*783 keys (294×518px). "
-                             "sw=64 (default/accurate), sw=16 (~1.9 fps), sw=8 (~2.1 fps) with float16.")
+                        help="KV-cache sliding window in frames. Speed/quality tradeoff "
+                             "(float16, 294×518px, sf=8): sw=64 accurate, sw=16 ~1.9fps, "
+                             "sw=8 ~2.1fps, sw=4 ~2.4fps. Compounds with --scale-frames: "
+                             "sf=1+sw=4 → 2.82fps, sf=1+sw=1 → 3.0fps.")
     parser.add_argument("--max-special-frames", type=int, default=None,
                         help="Cap k_special (evicted frames' tokens) at this many frames. "
                              "k_special grows 6 tokens/frame indefinitely; for sequences "
