@@ -144,9 +144,9 @@ def main():
                         help="Resize images to this square size")
     parser.add_argument("--scale-frames", type=int, default=8,
                         help="Number of initial scale frames (Phase 1). "
-                             "Also a speed lever: reduces permanent KV cache from "
-                             "(sf+sw)*tokens to fewer keys. sf=4 saves ~16%%, sf=1 saves ~29%% "
-                             "vs sf=8 (with sw=16, 294x518px).")
+                             "Minor speed lever: sf=1 gives ~10%% speedup vs sf=8 "
+                             "(2.09→1.90 fps, sw=16 float16); sf=4 is negligible. "
+                             "Lower values reduce initialization quality.")
     parser.add_argument("--keyframe-interval", type=int, default=1,
                         help="Keyframe interval (1 = every frame)")
     parser.add_argument("--kv-sliding-window", type=int, default=64,
