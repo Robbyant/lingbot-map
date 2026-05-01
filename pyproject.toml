@@ -17,6 +17,7 @@ dependencies = [
 [project.optional-dependencies]
 vis = ["viser>=0.2.23", "trimesh", "matplotlib", "onnxruntime", "requests"]
 demo = ["lingbot-map[vis]"]
+mlx = ["mlx==0.31.2", "mlx-metal==0.31.2"]
 
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]
