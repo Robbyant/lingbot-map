@@ -129,6 +129,48 @@ pip install --index-url https://pypi.org/simple flashinfer-python
 pip install -e ".[vis]"
 ```
 
+### 💚 Alternative: `uv` for faster installs (conda alternative)
+
+The `pyproject.toml` is fully compatible with [`uv`](https://github.com/astral-sh/uv), a fast Python package installer and virtual environment manager written in Rust. It mirrors the conda setup below but resolves and installs dependencies orders of magnitude faster:
+
+**1. Create uv virtual environment**
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+uv venv --python 3.12
+source .venv/bin/activate
+```
+
+**2. Install core package (installs all dependencies from `pyproject.toml`)**
+
+```bash
+uv sync
+```
+
+This installs the package in editable mode (`-e .`) plus all listed `[project]` dependencies — including `torch`, `torchvision`, `flashinfer-python`, `Pillow`, `huggingface_hub`, `einops`, `safetensors`, `opencv-python`, `tqdm`, `scipy`, and `flashinfer-cubin`.
+
+> **Note:** PyTorch version pinning (`2.8.0` with CUDA 12.8) is currently specified in the conda guide for Kaolin compatibility. If you need that exact pin, install it first:
+> ```bash
+> uv pip install torch==2.8.0 torchvision==0.23.0 \
+>     --index-url https://download.pytorch.org/whl/cu128
+> ```
+
+**3. Optional — visualization dependencies**
+
+```bash
+uv sync --group vis
+```
+
+Installs `[project.optional-dependencies.vis]` (`viser`, `trimesh`, `matplotlib`, `onnxruntime-gpu`, `requests`).
+
+**4. Optional — demo extra (pulls in `vis`)**
+
+```bash
+uv sync --group demo
+```
+
+> `uv` manages the virtual environment entirely through PEP 621 metadata from `pyproject.toml` — no `environment.yml`, no conda channels needed. It is fully compatible with the existing conda instructions above; pick whichever tooling you prefer.
+
 ## 📦 Model Download
 
 | Model Name | Huggingface Repository | ModelScope Repository | Description |

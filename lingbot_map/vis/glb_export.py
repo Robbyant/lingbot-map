@@ -5,12 +5,15 @@
 # LICENSE file in the root directory of this source tree.
 
 """
-GLB 3D export utilities for GCT predictions.
+3D export utilities for GCT predictions.
 """
 
 import os
 import copy
-from typing import Optional, Tuple
+import importlib
+import importlib.util
+from collections import OrderedDict
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import cv2
@@ -25,10 +28,10 @@ from lingbot_map.vis.sky_segmentation import (
     _result_map_to_non_sky_conf,
 )
 
-try:
-    import trimesh
-except ImportError:
-    trimesh = None
+trimesh: Any = None
+if importlib.util.find_spec("trimesh") is not None:
+    trimesh = importlib.import_module("trimesh")
+else:
     print("trimesh not found. GLB export will not work.")
 
 
@@ -78,7 +81,172 @@ def predictions_to_glb(
         conf_thres = 10.0
 
     print("Building GLB scene")
+    vertices_3d, colors_rgb, extrinsics_matrices, scene_scale = _prepare_export_point_cloud(
+        predictions,
+        conf_thres=conf_thres,
+        filter_by_frames=filter_by_frames,
+        mask_black_bg=mask_black_bg,
+        mask_white_bg=mask_white_bg,
+        mask_sky=mask_sky,
+        target_dir=target_dir,
+        prediction_mode=prediction_mode,
+    )
 
+    if np.asarray(vertices_3d).size == 0:
+        vertices_3d = np.array([[1.0, 0.0, 0.0]], dtype=np.float32)
+        colors_rgb = np.array([[255, 255, 255]], dtype=np.uint8)
+
+    colormap = matplotlib.colormaps.get_cmap("gist_rainbow")
+
+    scene_3d = trimesh.Scene()
+    point_cloud_data = trimesh.PointCloud(vertices=vertices_3d, colors=colors_rgb)
+    scene_3d.add_geometry(point_cloud_data)
+
+    # Add cameras
+    if show_cam and len(extrinsics_matrices) > 0:
+        num_cameras = len(extrinsics_matrices)
+        for i in range(num_cameras):
+            world_to_camera = extrinsics_matrices[i]
+            camera_to_world = np.linalg.inv(world_to_camera)
+            rgba_color = colormap(i / num_cameras)
+            current_color = (
+                int(255 * rgba_color[0]),
+                int(255 * rgba_color[1]),
+                int(255 * rgba_color[2]),
+            )
+            integrate_camera_into_scene(scene_3d, camera_to_world, current_color, scene_scale)
+
+    # Align scene
+    if len(extrinsics_matrices) > 0:
+        scene_3d = apply_scene_alignment(scene_3d, extrinsics_matrices)
+
+    print("GLB Scene built")
+    return scene_3d
+
+
+def predictions_to_ply(
+    predictions: dict,
+    output_path: str,
+    conf_thres: float = 50.0,
+    filter_by_frames: str = "all",
+    mask_black_bg: bool = False,
+    mask_white_bg: bool = False,
+    mask_sky: bool = False,
+    target_dir: Optional[str] = None,
+    prediction_mode: str = "Predicted Pointmap",
+) -> int:
+    """
+    Export filtered prediction points as a PLY point cloud.
+
+    Args:
+        predictions: Prediction dictionary in the same format as predictions_to_glb.
+        output_path: Destination ``.ply`` path.
+        conf_thres: Percentage of low-confidence points to filter out.
+        filter_by_frames: Frame filter specification ("all" or frame index).
+        mask_black_bg: Mask out black background pixels.
+        mask_white_bg: Mask out white background pixels.
+        mask_sky: Apply sky segmentation mask.
+        target_dir: Output directory for intermediate files.
+        prediction_mode: "Predicted Pointmap" or "Predicted Depthmap".
+
+    Returns:
+        Number of exported points.
+    """
+    vertices_3d, colors_rgb, extrinsics_matrices, _ = _prepare_export_point_cloud(
+        predictions,
+        conf_thres=conf_thres,
+        filter_by_frames=filter_by_frames,
+        mask_black_bg=mask_black_bg,
+        mask_white_bg=mask_white_bg,
+        mask_sky=mask_sky,
+        target_dir=target_dir,
+        prediction_mode=prediction_mode,
+    )
+    if len(vertices_3d) > 0 and len(extrinsics_matrices) > 0:
+        vertices_3d = apply_scene_alignment_to_vertices(vertices_3d, extrinsics_matrices)
+    save_point_cloud_to_ply(vertices_3d, colors_rgb, output_path)
+    return int(len(vertices_3d))
+
+
+def save_point_cloud_to_ply(
+    vertices: np.ndarray,
+    colors_rgb: np.ndarray,
+    output_path: str,
+    normals: Optional[np.ndarray] = None,
+    alpha: Optional[np.ndarray] = None,
+    extra_vertex_properties: Optional[Dict[str, np.ndarray]] = None,
+    comments: Optional[List[str]] = None,
+    extra_elements: Optional[List[Tuple[str, Dict[str, np.ndarray]]]] = None,
+) -> None:
+    """Write a point cloud to a binary little-endian PLY file."""
+    vertices = np.asarray(vertices, dtype=np.float32)
+    colors_rgb = _coerce_colors_to_uint8(colors_rgb)
+
+    if vertices.ndim != 2 or vertices.shape[1] != 3:
+        raise ValueError(f"vertices must have shape (N, 3), got {vertices.shape}")
+    if colors_rgb.ndim != 2 or colors_rgb.shape[1] != 3:
+        raise ValueError(f"colors_rgb must have shape (N, 3), got {colors_rgb.shape}")
+    if len(vertices) != len(colors_rgb):
+        raise ValueError(
+            f"vertices/colors length mismatch: {len(vertices)} vs {len(colors_rgb)}"
+        )
+
+    out_dir = os.path.dirname(output_path)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+
+    vertex_properties: "OrderedDict[str, np.ndarray]" = OrderedDict()
+    vertex_properties["x"] = vertices[:, 0]
+    vertex_properties["y"] = vertices[:, 1]
+    vertex_properties["z"] = vertices[:, 2]
+    vertex_properties["red"] = colors_rgb[:, 0]
+    vertex_properties["green"] = colors_rgb[:, 1]
+    vertex_properties["blue"] = colors_rgb[:, 2]
+
+    if normals is not None:
+        normals = np.asarray(normals, dtype=np.float32)
+        if normals.ndim != 2 or normals.shape != vertices.shape:
+            raise ValueError(
+                f"normals must have shape {vertices.shape}, got {normals.shape}"
+            )
+        vertex_properties["nx"] = normals[:, 0]
+        vertex_properties["ny"] = normals[:, 1]
+        vertex_properties["nz"] = normals[:, 2]
+
+    if alpha is not None:
+        alpha = np.asarray(alpha)
+        if alpha.ndim != 1 or len(alpha) != len(vertices):
+            raise ValueError(
+                f"alpha must have shape ({len(vertices)},), got {alpha.shape}"
+            )
+        vertex_properties["alpha"] = np.clip(alpha, 0, 255).astype(np.uint8)
+
+    if extra_vertex_properties:
+        for name, values in extra_vertex_properties.items():
+            if name in vertex_properties:
+                raise ValueError(f"duplicate PLY vertex property: {name}")
+            vertex_properties[name] = _coerce_ply_property_array(
+                name, values, len(vertices)
+            )
+
+    elements: List[Tuple[str, Dict[str, np.ndarray]]] = [("vertex", vertex_properties)]
+    if extra_elements:
+        elements.extend(extra_elements)
+
+    _write_ply_elements(output_path, elements, comments)
+
+
+def _prepare_export_point_cloud(
+    predictions: dict,
+    conf_thres: float = 50.0,
+    filter_by_frames: str = "all",
+    mask_black_bg: bool = False,
+    mask_white_bg: bool = False,
+    mask_sky: bool = False,
+    target_dir: Optional[str] = None,
+    prediction_mode: str = "Predicted Pointmap",
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+    """Prepare filtered point-cloud export data shared by GLB and PLY."""
     # Parse frame filter
     selected_frame_idx = None
     if filter_by_frames != "all" and filter_by_frames != "All":
@@ -111,35 +279,29 @@ def predictions_to_glb(
     images = predictions["images"]
     camera_matrices = predictions["extrinsic"]
 
-    # Apply sky segmentation if enabled
     if mask_sky and target_dir is not None:
         pred_world_points_conf = _apply_sky_mask(
             pred_world_points_conf, target_dir, images
         )
 
-    # Apply frame filter
     if selected_frame_idx is not None:
         pred_world_points = pred_world_points[selected_frame_idx][None]
         pred_world_points_conf = pred_world_points_conf[selected_frame_idx][None]
         images = images[selected_frame_idx][None]
         camera_matrices = camera_matrices[selected_frame_idx][None]
 
-    # Prepare vertices and colors
-    vertices_3d = pred_world_points.reshape(-1, 3)
+    vertices_3d = np.asarray(pred_world_points).reshape(-1, 3).astype(np.float32, copy=False)
 
-    # Handle different image formats
-    if images.ndim == 4 and images.shape[1] == 3:  # NCHW format
+    if images.ndim == 4 and images.shape[1] == 3:
         colors_rgb = np.transpose(images, (0, 2, 3, 1))
     else:
         colors_rgb = images
-    colors_rgb = (colors_rgb.reshape(-1, 3) * 255).astype(np.uint8)
+    colors_rgb = _coerce_colors_to_uint8(colors_rgb.reshape(-1, 3))
 
-    # Apply confidence filtering
-    conf = pred_world_points_conf.reshape(-1)
+    conf = np.asarray(pred_world_points_conf).reshape(-1)
     conf_threshold = np.percentile(conf, conf_thres) if conf_thres > 0 else 0.0
     conf_mask = (conf >= conf_threshold) & (conf > 1e-5)
 
-    # Apply background masking
     if mask_black_bg:
         black_bg_mask = colors_rgb.sum(axis=1) >= 16
         conf_mask = conf_mask & black_bg_mask
@@ -155,43 +317,30 @@ def predictions_to_glb(
     vertices_3d = vertices_3d[conf_mask]
     colors_rgb = colors_rgb[conf_mask]
 
-    # Handle empty point cloud
-    if vertices_3d is None or np.asarray(vertices_3d).size == 0:
-        vertices_3d = np.array([[1, 0, 0]])
-        colors_rgb = np.array([[255, 255, 255]])
-        scene_scale = 1
+    extrinsics_matrices = np.zeros((len(camera_matrices), 4, 4), dtype=np.float32)
+    if len(camera_matrices) > 0:
+        extrinsics_matrices[:, :3, :4] = camera_matrices
+        extrinsics_matrices[:, 3, 3] = 1
+
+    if np.asarray(vertices_3d).size == 0:
+        scene_scale = 1.0
     else:
         lower_percentile = np.percentile(vertices_3d, 5, axis=0)
         upper_percentile = np.percentile(vertices_3d, 95, axis=0)
-        scene_scale = np.linalg.norm(upper_percentile - lower_percentile)
+        scene_scale = float(np.linalg.norm(upper_percentile - lower_percentile))
+        scene_scale = max(scene_scale, 0.1)
 
-    colormap = matplotlib.colormaps.get_cmap("gist_rainbow")
+    return vertices_3d, colors_rgb, extrinsics_matrices, scene_scale
 
-    # Build scene
-    scene_3d = trimesh.Scene()
-    point_cloud_data = trimesh.PointCloud(vertices=vertices_3d, colors=colors_rgb)
-    scene_3d.add_geometry(point_cloud_data)
 
-    # Prepare camera matrices
-    num_cameras = len(camera_matrices)
-    extrinsics_matrices = np.zeros((num_cameras, 4, 4))
-    extrinsics_matrices[:, :3, :4] = camera_matrices
-    extrinsics_matrices[:, 3, 3] = 1
-
-    # Add cameras
-    if show_cam:
-        for i in range(num_cameras):
-            world_to_camera = extrinsics_matrices[i]
-            camera_to_world = np.linalg.inv(world_to_camera)
-            rgba_color = colormap(i / num_cameras)
-            current_color = tuple(int(255 * x) for x in rgba_color[:3])
-            integrate_camera_into_scene(scene_3d, camera_to_world, current_color, scene_scale)
-
-    # Align scene
-    scene_3d = apply_scene_alignment(scene_3d, extrinsics_matrices)
-
-    print("GLB Scene built")
-    return scene_3d
+def _coerce_colors_to_uint8(colors_rgb: np.ndarray) -> np.ndarray:
+    """Convert float RGB in [0, 1] or integer RGB in [0, 255] to uint8."""
+    colors_rgb = np.asarray(colors_rgb)
+    if colors_rgb.dtype == np.uint8:
+        return colors_rgb
+    if np.issubdtype(colors_rgb.dtype, np.floating):
+        return (np.clip(colors_rgb, 0.0, 1.0) * 255).astype(np.uint8)
+    return np.clip(colors_rgb, 0, 255).astype(np.uint8)
 
 
 def _apply_sky_mask(
@@ -234,6 +383,9 @@ def _apply_sky_mask(
         else:
             sky_mask = segment_sky(image_filepath, skyseg_session, mask_filepath)
 
+        if sky_mask is None:
+            print(f"Warning: failed to read sky mask for {image_name}, keeping all pixels")
+            sky_mask = np.full((H, W), 255, dtype=np.uint8)
         if sky_mask.shape[0] != H or sky_mask.shape[1] != W:
             sky_mask = cv2.resize(sky_mask, (W, H), interpolation=cv2.INTER_LINEAR)
 
@@ -247,7 +399,7 @@ def _apply_sky_mask(
 def integrate_camera_into_scene(
     scene: "trimesh.Scene",
     transform: np.ndarray,
-    face_colors: Tuple[int, int, int],
+    face_colors: Sequence[int],
     scene_scale: float,
     frustum_thickness: float = 1.0,
 ):
@@ -304,7 +456,8 @@ def integrate_camera_into_scene(
 
     mesh_faces = compute_camera_faces_multi(camera_cone_shape, len(shell_scales))
     camera_mesh = trimesh.Trimesh(vertices=vertices_transformed, faces=mesh_faces)
-    camera_mesh.visual.face_colors[:, :3] = face_colors
+    camera_visual = camera_mesh.visual
+    camera_visual.face_colors[:, :3] = tuple(face_colors[:3])
     scene.add_geometry(camera_mesh)
 
 
@@ -322,16 +475,55 @@ def apply_scene_alignment(
     Returns:
         Aligned 3D scene
     """
+    initial_transformation = get_scene_alignment_transform(extrinsics_matrices)
+    scene_3d.apply_transform(initial_transformation)
+    return scene_3d
+
+
+def apply_scene_alignment_to_vertices(
+    vertices: np.ndarray,
+    extrinsics_matrices: np.ndarray,
+) -> np.ndarray:
+    """Apply the same scene alignment used by GLB export directly to vertices."""
+    if len(extrinsics_matrices) == 0:
+        return np.asarray(vertices, dtype=np.float32)
+
+    transformation = get_scene_alignment_transform(extrinsics_matrices)
+    return transform_points(transformation, np.asarray(vertices, dtype=np.float32))
+
+
+def apply_scene_alignment_to_directions(
+    vectors: np.ndarray,
+    extrinsics_matrices: np.ndarray,
+) -> np.ndarray:
+    """Apply scene alignment rotation to direction vectors such as normals."""
+    vectors = np.asarray(vectors, dtype=np.float32)
+    if len(extrinsics_matrices) == 0 or vectors.size == 0:
+        return vectors
+
+    rotation_only = np.eye(4, dtype=np.float32)
+    rotation_only[:3, :3] = get_scene_alignment_transform(extrinsics_matrices)[:3, :3]
+    rotated = transform_points(rotation_only, vectors)
+    norm = np.linalg.norm(rotated, axis=-1, keepdims=True)
+    valid = norm > 1e-8
+    rotated = np.where(valid, rotated / np.where(valid, norm, 1.0), 0.0)
+    return rotated.astype(np.float32, copy=False)
+
+
+def get_scene_alignment_transform(extrinsics_matrices: np.ndarray) -> np.ndarray:
+    """Return the world transform used to align GLB/PLY exports."""
+    if len(extrinsics_matrices) == 0:
+        return np.eye(4, dtype=np.float32)
+
     opengl_conversion_matrix = get_opengl_conversion_matrix()
 
     align_rotation = np.eye(4)
     align_rotation[:3, :3] = Rotation.from_euler("y", 180, degrees=True).as_matrix()
 
-    initial_transformation = (
+    transformation = (
         np.linalg.inv(extrinsics_matrices[0]) @ opengl_conversion_matrix @ align_rotation
     )
-    scene_3d.apply_transform(initial_transformation)
-    return scene_3d
+    return transformation.astype(np.float32, copy=False)
 
 
 def get_opengl_conversion_matrix() -> np.ndarray:
@@ -366,6 +558,131 @@ def transform_points(
     points = points @ transformation[..., :-1, :] + transformation[..., -1:, :]
 
     return points[..., :dim].reshape(*initial_shape, dim)
+
+
+def _write_ply_elements(
+    output_path: str,
+    elements: List[Tuple[str, Dict[str, np.ndarray]]],
+    comments: Optional[List[str]] = None,
+) -> None:
+    """Write one or more binary PLY elements to disk."""
+    prepared_elements = [
+        _prepare_ply_element(name, properties)
+        for name, properties in elements
+    ]
+
+    header_lines = [
+        "ply",
+        "format binary_little_endian 1.0",
+    ]
+    for comment in comments or []:
+        header_lines.append(f"comment {comment}")
+    for name, structured, property_specs in prepared_elements:
+        header_lines.append(f"element {name} {len(structured)}")
+        for property_name, ply_type in property_specs:
+            header_lines.append(f"property {ply_type} {property_name}")
+    header_lines.append("end_header")
+    header = "\n".join(header_lines) + "\n"
+
+    with open(output_path, "wb") as f:
+        f.write(header.encode("ascii"))
+        for _, structured, _ in prepared_elements:
+            structured.tofile(f)
+
+
+def _prepare_ply_element(
+    element_name: str,
+    properties: Dict[str, np.ndarray],
+) -> Tuple[str, np.ndarray, List[Tuple[str, str]]]:
+    """Normalize one PLY element into a structured array plus header specs."""
+    if not properties:
+        raise ValueError(f"PLY element {element_name!r} has no properties")
+
+    normalized: "OrderedDict[str, np.ndarray]" = OrderedDict()
+    element_length: Optional[int] = None
+    for property_name, values in properties.items():
+        values = np.asarray(values)
+        if values.ndim != 1:
+            raise ValueError(
+                f"PLY property {element_name}.{property_name} must be 1D, got {values.shape}"
+            )
+        if element_length is None:
+            element_length = len(values)
+        elif len(values) != element_length:
+            raise ValueError(
+                f"PLY element {element_name!r} property length mismatch for {property_name}: "
+                f"expected {element_length}, got {len(values)}"
+            )
+        normalized[property_name] = _normalize_ply_property_dtype(values)
+
+    assert element_length is not None
+    dtype_fields = []
+    property_specs = []
+    for property_name, values in normalized.items():
+        little_endian_dtype = values.dtype.newbyteorder("<")
+        dtype_fields.append((property_name, little_endian_dtype))
+        property_specs.append((property_name, _numpy_dtype_to_ply_type(little_endian_dtype)))
+
+    structured = np.empty(element_length, dtype=np.dtype(dtype_fields))
+    for property_name, values in normalized.items():
+        structured[property_name] = values.astype(
+            structured[property_name].dtype,
+            copy=False,
+        )
+
+    return element_name, structured, property_specs
+
+
+def _coerce_ply_property_array(
+    property_name: str,
+    values: np.ndarray,
+    expected_length: int,
+) -> np.ndarray:
+    """Validate an extra PLY property array against the expected vertex count."""
+    values = np.asarray(values)
+    if values.ndim != 1 or len(values) != expected_length:
+        raise ValueError(
+            f"PLY property {property_name!r} must have shape ({expected_length},), "
+            f"got {values.shape}"
+        )
+    return _normalize_ply_property_dtype(values)
+
+
+def _normalize_ply_property_dtype(values: np.ndarray) -> np.ndarray:
+    """Cast property arrays to PLY-compatible scalar dtypes."""
+    values = np.asarray(values)
+    if values.dtype == np.bool_:
+        return values.astype(np.uint8)
+    if values.dtype == np.float16:
+        return values.astype(np.float32)
+    if np.issubdtype(values.dtype, np.floating):
+        return values.astype(np.float32 if values.dtype.itemsize <= 4 else np.float64)
+    if np.issubdtype(values.dtype, np.signedinteger):
+        return values.astype(np.int32 if values.dtype.itemsize > 4 else values.dtype)
+    if np.issubdtype(values.dtype, np.unsignedinteger):
+        if values.dtype.itemsize > 4:
+            return values.astype(np.uint32)
+        return values.astype(values.dtype)
+    raise ValueError(f"Unsupported PLY property dtype: {values.dtype}")
+
+
+def _numpy_dtype_to_ply_type(dtype: np.dtype) -> str:
+    """Map a numpy scalar dtype to a binary PLY header type."""
+    dtype = np.dtype(dtype).newbyteorder("=")
+    dtype_map = {
+        np.dtype(np.int8): "char",
+        np.dtype(np.uint8): "uchar",
+        np.dtype(np.int16): "short",
+        np.dtype(np.uint16): "ushort",
+        np.dtype(np.int32): "int",
+        np.dtype(np.uint32): "uint",
+        np.dtype(np.float32): "float",
+        np.dtype(np.float64): "double",
+    }
+    try:
+        return dtype_map[dtype]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported PLY dtype: {dtype}") from exc
 
 
 def compute_camera_faces(cone_shape: "trimesh.Trimesh") -> np.ndarray:
@@ -435,6 +752,8 @@ def segment_sky(
         Continuous non-sky confidence map in [0, 1]
     """
     image = cv2.imread(image_path)
+    if image is None:
+        raise ValueError(f"Failed to read image for sky segmentation: {image_path}")
     result_map = run_skyseg(onnx_session, _SKYSEG_INPUT_SIZE, image)
     result_map_original = cv2.resize(
         result_map, (image.shape[1], image.shape[0]), interpolation=cv2.INTER_LINEAR

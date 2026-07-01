@@ -17,12 +17,12 @@ import threading
 import subprocess
 import tempfile
 import shutil
-from typing import List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict, Any, Tuple, cast
 
 import numpy as np
 import torch
 import cv2
-import matplotlib.cm as cm
+from matplotlib import colormaps
 from tqdm.auto import tqdm
 
 import viser
@@ -123,10 +123,16 @@ class PointCloudViewer:
         self.image_mask = image_mask
         self.show_camera = show_camera
         self.on_replay = False
-        self.vis_pts_list = []
-        self.traj_list = []
-        self.orig_img_list = [x[0] for x in color_list if len(x) > 0] if color_list else []
         self.via_points = []
+        self.max_history_frames = max(0, min(self.num_frames - 1, 200))
+        self.default_history_frames = min(20, self.max_history_frames)
+        self.default_max_render_points = 300_000
+        self._render_cache_token = None
+        self._frame_render_cache: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
+        self.active_point_handle = None
+        self.cam_handles = []
+        self.frame_visibility_mode = "current"
+        self.max_drawn_frame_idx = 0
 
         self._setup_gui()
         self.server.on_client_connect(self._connect_client)
@@ -164,6 +170,8 @@ class PointCloudViewer:
 
         # Compute world points from depth if not using the precomputed point map
         if not use_point_map:
+            if depth_map is None:
+                raise ValueError("depth predictions are required when use_point_map=False")
             world_points = unproject_depth_map_to_point_map(depth_map, extrinsics_cam, intrinsics_cam)
             conf = depth_conf
         else:
@@ -172,6 +180,8 @@ class PointCloudViewer:
 
         # Apply sky segmentation if enabled
         if mask_sky:
+            if conf is None:
+                raise ValueError("confidence predictions are required when mask_sky=True")
             conf = apply_sky_segmentation(
                 conf, image_folder=image_folder, images=images,
                 sky_mask_dir=sky_mask_dir,
@@ -190,7 +200,6 @@ class PointCloudViewer:
             self.original_images.append(img)
 
         # Create lists - apply depth_stride to skip frames for point projection
-        H, W = world_points.shape[1], world_points.shape[2]
         pc_list = []
         color_list = []
         conf_list = []
@@ -388,16 +397,21 @@ class PointCloudViewer:
 
         button3 = self.server.gui.add_button("4D (Only Show Current Frame)")
         button4 = self.server.gui.add_button("3D (Show All Frames)")
-        self.is_render = False
-        self.fourd = False
+        button5 = self.server.gui.add_button("Recent Frame History")
 
         @button3.on_click
         def _(event: viser.GuiEvent) -> None:
-            self.fourd = True
+            self._set_frame_visibility_mode("current")
 
         @button4.on_click
         def _(event: viser.GuiEvent) -> None:
-            self.fourd = False
+            self._set_frame_visibility_mode("all")
+
+        @button5.on_click
+        def _(event: viser.GuiEvent) -> None:
+            self._set_frame_visibility_mode("recent")
+            if hasattr(self, "gui_history_frames"):
+                self.gui_history_frames.value = self.default_history_frames
 
         self.focal_slider = self.server.gui.add_slider(
             "Focal Length", min=0.1, max=99999, step=1, initial_value=533
@@ -441,8 +455,8 @@ class PointCloudViewer:
         def _(event: viser.GuiEvent) -> None:
             self._take_screenshot(event.client)
 
-        # GLB export controls
-        with self.server.gui.add_folder("Export GLB"):
+        # 3D export controls
+        with self.server.gui.add_folder("Export 3D"):
             self.glb_output_path = self.server.gui.add_text(
                 "Output Path", initial_value="export.glb"
             )
@@ -498,6 +512,14 @@ class PointCloudViewer:
                 hint="Export current filtered point clouds and cameras as GLB.",
             )
             self.glb_status = self.server.gui.add_text("Status", initial_value="Ready")
+            self.ply_output_path = self.server.gui.add_text(
+                "PLY Output Path", initial_value="export.ply"
+            )
+            self.ply_export_button = self.server.gui.add_button(
+                "Export PLY",
+                hint="Export the current filtered point cloud as a PLY file.",
+            )
+            self.ply_status = self.server.gui.add_text("PLY Status", initial_value="Ready")
 
         @self.glb_mode_dropdown.on_update
         def _(_) -> None:
@@ -508,6 +530,10 @@ class PointCloudViewer:
         @self.glb_export_button.on_click
         def _(_) -> None:
             self._export_glb()
+
+        @self.ply_export_button.on_click
+        def _(_) -> None:
+            self._export_ply()
 
         # Video saving controls
         with self.server.gui.add_folder("Video Saving"):
@@ -534,19 +560,14 @@ class PointCloudViewer:
             if self.current_frame_image is not None:
                 self.current_frame_image.visible = self.show_video_checkbox.value
 
-        self.pc_handles = []
-        self.cam_handles = []
-
         @self.psize_slider.on_update
         def _(_) -> None:
-            for handle in self.pc_handles:
-                handle.point_size = self.psize_slider.value
+            if self.active_point_handle is not None:
+                self.active_point_handle.point_size = self.psize_slider.value
 
         @self.camsize_slider.on_update
         def _(_) -> None:
-            for handle in self.cam_handles:
-                handle.scale = self.camsize_slider.value
-                handle.line_thickness = 0.03 * handle.scale
+            self._regenerate_cameras()
 
         @self.downsample_slider.on_update
         def _(_) -> None:
@@ -558,8 +579,7 @@ class PointCloudViewer:
             if self.show_camera:
                 self._regenerate_cameras()
             else:
-                for handle in self.cam_handles:
-                    handle.visible = False
+                self._clear_active_cameras()
 
         @self.vis_threshold_slider.on_update
         def _(_) -> None:
@@ -571,43 +591,199 @@ class PointCloudViewer:
             self._regenerate_cameras()
 
     def _regenerate_point_clouds(self):
-        """Regenerate all point clouds with current settings."""
-        if not hasattr(self, 'frame_nodes'):
-            return
-
-        for handle in self.pc_handles:
-            try:
-                handle.remove()
-            except (KeyError, AttributeError):
-                pass
-        self.pc_handles.clear()
-        self.vis_pts_list.clear()
-
-        for i, step in enumerate(self.all_steps):
-            pc = self.pcs[step]["pc"]
-            color = self.pcs[step]["color"]
-            conf = self.pcs[step]["conf"]
-            edge_color = self.pcs[step].get("edge_color", None)
-
-            pred_pts, pc_color = self.parse_pc_data(
-                pc, color, conf, edge_color, set_border_color=True,
-                downsample_factor=self.downsample_slider.value
-            )
-
-            self.vis_pts_list.append(pred_pts)
-            handle = self.server.scene.add_point_cloud(
-                name=f"/frames/{step}/pred_pts",
-                points=pred_pts,
-                colors=pc_color,
-                point_size=self.psize_slider.value,
-            )
-            self.pc_handles.append(handle)
+        """Regenerate the active browser point cloud with current settings."""
+        self._invalidate_point_cache()
+        self._refresh_active_scene()
 
     def _regenerate_cameras(self):
-        """Regenerate camera visualizations with current settings."""
-        if not hasattr(self, 'frame_nodes'):
-            return
+        """Regenerate active camera visualizations with current settings."""
+        self._clear_active_cameras()
+        self._refresh_active_scene()
 
+    def _invalidate_point_cache(self) -> None:
+        """Clear filtered point-cache entries after a render-setting change."""
+        self._render_cache_token = None
+        self._frame_render_cache.clear()
+
+    def _get_render_cache_token(self) -> Tuple[float, int]:
+        """Return the render-settings token used for cached filtered points."""
+        return (float(self.vis_threshold), int(self.downsample_slider.value))
+
+    def _get_filtered_frame_geometry(self, step: int) -> Tuple[np.ndarray, np.ndarray]:
+        """Get filtered/downsampled point cloud data for one frame."""
+        token = self._get_render_cache_token()
+        if token != self._render_cache_token:
+            self._render_cache_token = token
+            self._frame_render_cache.clear()
+
+        cached = self._frame_render_cache.get(step)
+        if cached is not None:
+            return cached
+
+        frame_payload = self._extract_frame_export_samples(step)
+        pred_pts = frame_payload["points"]
+        color = frame_payload["colors"]
+        self._frame_render_cache[step] = (pred_pts, color)
+        return pred_pts, color
+
+    @staticmethod
+    def _compute_frame_normals(pc: np.ndarray) -> np.ndarray:
+        """Estimate per-point normals from a structured point-map frame."""
+        pc = np.asarray(pc, dtype=np.float32)
+        if pc.ndim != 3 or pc.shape[-1] != 3 or pc.size == 0:
+            return np.zeros_like(pc, dtype=np.float32)
+
+        right = np.roll(pc, -1, axis=1) - pc
+        left = pc - np.roll(pc, 1, axis=1)
+        down = np.roll(pc, -1, axis=0) - pc
+        up = pc - np.roll(pc, 1, axis=0)
+        normals = np.cross(right + left, down + up)
+
+        invalid = ~np.isfinite(pc).all(axis=2)
+        invalid |= np.roll(invalid, 1, axis=0)
+        invalid |= np.roll(invalid, -1, axis=0)
+        invalid |= np.roll(invalid, 1, axis=1)
+        invalid |= np.roll(invalid, -1, axis=1)
+        normals[invalid] = 0.0
+        normals[[0, -1], :, :] = 0.0
+        normals[:, [0, -1], :] = 0.0
+
+        lengths = np.linalg.norm(normals, axis=2, keepdims=True)
+        valid = lengths[..., 0] > 1e-8
+        normals[valid] /= lengths[valid]
+        normals[~valid] = 0.0
+        return normals.astype(np.float32, copy=False)
+
+    def _extract_frame_export_samples(self, step: int) -> Dict[str, np.ndarray]:
+        """Collect filtered export samples plus metadata for one frame."""
+        frame = self.pcs[step]
+        pc = np.asarray(frame["pc"], dtype=np.float32)
+        color = np.asarray(frame["color"])
+        conf = frame["conf"]
+
+        points = pc.reshape(-1, 3)
+        normals = self._compute_frame_normals(pc).reshape(-1, 3)
+
+        if color.size == 0:
+            colors = np.zeros((len(points), 3), dtype=np.uint8)
+        elif np.isnan(color).any():
+            colors = np.zeros((len(points), 3), dtype=np.float32)
+            colors[:, 2] = 1.0
+        else:
+            colors = color.reshape(-1, 3)
+        colors = np.asarray(colors)
+        if colors.dtype != np.uint8:
+            colors = (np.clip(colors, 0.0, 1.0) * 255).astype(np.uint8)
+
+        if conf is None:
+            confidence = np.ones((len(points),), dtype=np.float32)
+        else:
+            confidence = np.asarray(conf, dtype=np.float32).reshape(-1)
+
+        if pc.ndim >= 2:
+            pixel_row, pixel_col = np.indices(pc.shape[:2], dtype=np.int32)
+            pixel_row = pixel_row.reshape(-1)
+            pixel_col = pixel_col.reshape(-1)
+        else:
+            pixel_row = np.zeros((len(points),), dtype=np.int32)
+            pixel_col = np.zeros((len(points),), dtype=np.int32)
+
+        if len(points) == 0:
+            return {
+                "points": np.zeros((0, 3), dtype=np.float32),
+                "colors": np.zeros((0, 3), dtype=np.uint8),
+                "normals": np.zeros((0, 3), dtype=np.float32),
+                "confidence": np.zeros((0,), dtype=np.float32),
+                "frame_index": np.zeros((0,), dtype=np.int32),
+                "pixel_row": np.zeros((0,), dtype=np.int32),
+                "pixel_col": np.zeros((0,), dtype=np.int32),
+            }
+
+        valid = np.isfinite(points).all(axis=1)
+        valid &= np.isfinite(confidence)
+        valid &= np.isfinite(normals).all(axis=1)
+
+        points = points[valid]
+        colors = colors[valid]
+        normals = normals[valid]
+        confidence = confidence[valid]
+        pixel_row = pixel_row[valid]
+        pixel_col = pixel_col[valid]
+
+        conf_mask = confidence > float(self.vis_threshold)
+        points = points[conf_mask]
+        colors = colors[conf_mask]
+        normals = normals[conf_mask]
+        confidence = confidence[conf_mask]
+        pixel_row = pixel_row[conf_mask]
+        pixel_col = pixel_col[conf_mask]
+
+        downsample_factor = max(1, int(self.downsample_slider.value))
+        if downsample_factor > 1 and len(points) > 0:
+            indices = np.arange(0, len(points), downsample_factor)
+            points = points[indices]
+            colors = colors[indices]
+            normals = normals[indices]
+            confidence = confidence[indices]
+            pixel_row = pixel_row[indices]
+            pixel_col = pixel_col[indices]
+
+        frame_index = np.full((len(points),), int(step), dtype=np.int32)
+        return {
+            "points": np.asarray(points, dtype=np.float32),
+            "colors": np.asarray(colors, dtype=np.uint8),
+            "normals": np.asarray(normals, dtype=np.float32),
+            "confidence": np.asarray(confidence, dtype=np.float32),
+            "frame_index": frame_index,
+            "pixel_row": np.asarray(pixel_row, dtype=np.int32),
+            "pixel_col": np.asarray(pixel_col, dtype=np.int32),
+        }
+
+    def _get_visible_step_indices(self) -> List[int]:
+        """Get the frame indices currently visible in the browser scene."""
+        if not hasattr(self, "gui_timestep"):
+            return []
+
+        current_idx = int(self.gui_timestep.value)
+        mode = getattr(self, "frame_visibility_mode", "current")
+        if mode == "current":
+            return [current_idx]
+        if mode == "all":
+            retained_end = max(current_idx, int(self.max_drawn_frame_idx))
+            return list(range(0, retained_end + 1))
+
+        history = int(self.gui_history_frames.value) if hasattr(self, "gui_history_frames") else 0
+        start_idx = max(0, current_idx - history)
+        return list(range(start_idx, current_idx + 1))
+
+    def _set_frame_visibility_mode(self, mode: str) -> None:
+        """Switch between current-frame, cumulative, and recent-history rendering."""
+        self.frame_visibility_mode = mode
+        if mode == "all" and hasattr(self, "gui_timestep"):
+            self.max_drawn_frame_idx = int(self.gui_timestep.value)
+        if hasattr(self, "gui_history_frames"):
+            self.gui_history_frames.disabled = mode != "recent"
+        if hasattr(self, "gui_timestep"):
+            self.update_frame_visibility()
+
+    def _limit_rendered_points(
+        self,
+        points: np.ndarray,
+        colors: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Bound the browser payload to keep the UI responsive."""
+        if not hasattr(self, "gui_max_render_points"):
+            return points, colors
+
+        max_points = int(self.gui_max_render_points.value)
+        if max_points <= 0 or len(points) <= max_points:
+            return points, colors
+
+        stride = max(1, int(np.ceil(len(points) / max_points)))
+        return points[::stride], colors[::stride]
+
+    def _clear_active_cameras(self) -> None:
+        """Remove the currently rendered camera handles from the scene."""
         for handle in self.cam_handles:
             try:
                 handle.remove()
@@ -615,11 +791,280 @@ class PointCloudViewer:
                 pass
         self.cam_handles.clear()
 
-        if self.show_camera:
-            downsample_factor = int(self.camera_downsample_slider.value)
-            for i, step in enumerate(self.all_steps):
-                if i % downsample_factor == 0:
-                    self.add_camera(step)
+    def _refresh_active_scene(self) -> None:
+        """Refresh the bounded working set rendered in the browser."""
+        if not hasattr(self, "gui_timestep"):
+            return
+
+        visible_indices = self._get_visible_step_indices()
+        visible_steps = [self.all_steps[i] for i in visible_indices]
+
+        all_points = []
+        all_colors = []
+        for step in visible_steps:
+            pts, cols = self._get_filtered_frame_geometry(step)
+            if len(pts) == 0:
+                continue
+            all_points.append(pts)
+            all_colors.append(cols)
+
+        if all_points:
+            points = np.concatenate(all_points, axis=0)
+            colors = np.concatenate(all_colors, axis=0)
+            points, colors = self._limit_rendered_points(points, colors)
+        else:
+            points = np.zeros((0, 3), dtype=np.float32)
+            colors = np.zeros((0, 3), dtype=np.uint8)
+
+        with self.server.atomic():
+            if self.active_point_handle is None:
+                self.active_point_handle = self.server.scene.add_point_cloud(
+                    name="/active/points",
+                    points=points,
+                    colors=colors,
+                    point_size=self.psize_slider.value,
+                )
+            else:
+                self.active_point_handle.points = points
+                self.active_point_handle.colors = colors
+                self.active_point_handle.point_size = self.psize_slider.value
+            self.active_point_handle.visible = len(points) > 0
+
+            self._clear_active_cameras()
+            if not self.show_camera or self.cam_dict is None:
+                return
+
+            downsample_factor = max(1, int(self.camera_downsample_slider.value))
+            current_step = self.all_steps[int(self.gui_timestep.value)]
+            for offset, step in enumerate(visible_steps):
+                if step != current_step and (offset % downsample_factor) != 0:
+                    continue
+                self.add_camera(step)
+
+    def _apply_export_color_adjustments(
+        self,
+        colors_rgb: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Apply shared Export 3D color/opacity controls."""
+        colors_float = np.asarray(colors_rgb, dtype=np.float32) / 255.0
+
+        sat_boost = float(self.glb_saturation_slider.value)
+        if sat_boost != 1.0:
+            gray = colors_float.mean(axis=1, keepdims=True)
+            colors_float = gray + sat_boost * (colors_float - gray)
+
+        bri_boost = float(self.glb_brightness_slider.value)
+        if bri_boost != 1.0:
+            colors_float = colors_float * bri_boost
+
+        alpha = float(self.glb_opacity_slider.value)
+        if alpha < 1.0:
+            bg = np.ones_like(colors_float)
+            colors_float = colors_float * alpha + bg * (1.0 - alpha)
+
+        colors_float = np.clip(colors_float, 0.0, 1.0)
+        colors_u8 = (colors_float * 255).astype(np.uint8)
+        alpha_u8 = np.full(
+            (len(colors_u8),),
+            int(np.clip(round(alpha * 255), 0, 255)),
+            dtype=np.uint8,
+        )
+        return colors_u8, alpha_u8
+
+    @staticmethod
+    def _slice_export_point_payload(
+        payload: Dict[str, np.ndarray],
+        indices: np.ndarray,
+    ) -> Dict[str, np.ndarray]:
+        """Slice every per-point array in an export payload consistently."""
+        point_count = len(payload["points"])
+        sliced: Dict[str, np.ndarray] = {}
+        for key, values in payload.items():
+            if isinstance(values, np.ndarray) and len(values) == point_count:
+                sliced[key] = values[indices]
+            else:
+                sliced[key] = values
+        return sliced
+
+    def _apply_export_mode_to_point_payload(
+        self,
+        payload: Dict[str, np.ndarray],
+    ) -> Dict[str, np.ndarray]:
+        """Apply Export 3D mode-specific point sampling/radius controls."""
+        export_mode = self.glb_mode_dropdown.value
+        point_radius = 0.0
+        updated_payload = dict(payload)
+
+        if export_mode == "Spheres":
+            point_radius = float(self.glb_sphere_radius_slider.value)
+            max_pts = max(1, int(self.glb_max_sphere_pts_slider.value))
+            if len(updated_payload["points"]) > max_pts:
+                indices = np.linspace(
+                    0,
+                    len(updated_payload["points"]) - 1,
+                    max_pts,
+                    dtype=np.int64,
+                )
+                indices = np.unique(indices)
+                updated_payload = self._slice_export_point_payload(updated_payload, indices)
+
+        updated_payload["render_radius"] = np.full(
+            (len(updated_payload["points"]),),
+            point_radius,
+            dtype=np.float32,
+        )
+        return updated_payload
+
+    def _get_scene_alignment_extrinsics(self) -> np.ndarray:
+        """Build the reference extrinsics array used by GLB/PLY alignment."""
+        if self.cam_dict is None or len(self.all_steps) == 0:
+            return np.zeros((0, 4, 4), dtype=np.float32)
+
+        step0 = self.all_steps[0]
+        R0 = self.cam_dict["R"][step0] if "R" in self.cam_dict else np.eye(3)
+        t0 = self.cam_dict["t"][step0] if "t" in self.cam_dict else np.zeros(3)
+        c2w_0 = np.eye(4, dtype=np.float32)
+        c2w_0[:3, :3] = R0
+        c2w_0[:3, 3] = t0
+        w2c_0 = np.linalg.inv(c2w_0)
+        return np.expand_dims(w2c_0.astype(np.float32), 0)
+
+    def _build_camera_export_payload(self) -> Optional[Dict[str, np.ndarray]]:
+        """Prepare aligned camera-pose metadata for companion PLY export."""
+        if self.cam_dict is None or len(self.all_steps) == 0:
+            return None
+
+        from lingbot_map.vis.glb_export import get_scene_alignment_transform
+
+        num_cameras = len(self.all_steps)
+        camera_to_world = np.repeat(np.eye(4, dtype=np.float32)[None], num_cameras, axis=0)
+        focal = np.ones((num_cameras,), dtype=np.float32)
+        principal_x = np.ones((num_cameras,), dtype=np.float32)
+        principal_y = np.ones((num_cameras,), dtype=np.float32)
+
+        for i, step in enumerate(self.all_steps):
+            R = self.cam_dict["R"][step] if "R" in self.cam_dict else np.eye(3)
+            t = self.cam_dict["t"][step] if "t" in self.cam_dict else np.zeros(3)
+            pp = self.cam_dict["pp"][step] if "pp" in self.cam_dict else (1.0, 1.0)
+            focal[i] = self.cam_dict["focal"][step] if "focal" in self.cam_dict else 1.0
+            principal_x[i] = pp[0]
+            principal_y[i] = pp[1]
+            camera_to_world[i, :3, :3] = R
+            camera_to_world[i, :3, 3] = t
+
+        alignment_transform = get_scene_alignment_transform(
+            self._get_scene_alignment_extrinsics()
+        )
+        aligned_camera_to_world = np.einsum(
+            "ij,njk->nik", alignment_transform, camera_to_world
+        )
+        positions = aligned_camera_to_world[:, :3, 3].astype(np.float32)
+        rotations = aligned_camera_to_world[:, :3, :3].astype(np.float32)
+        quaternions = np.stack(
+            [np.asarray(tf.SO3.from_matrix(R).wxyz, dtype=np.float32) for R in rotations],
+            axis=0,
+        )
+        forward = rotations[:, :, 2].astype(np.float32)
+        up = (-rotations[:, :, 1]).astype(np.float32)
+        right = rotations[:, :, 0].astype(np.float32)
+
+        trajectory_distance = np.zeros((num_cameras,), dtype=np.float32)
+        if num_cameras > 1:
+            segment_lengths = np.linalg.norm(np.diff(positions, axis=0), axis=1).astype(np.float32)
+            trajectory_distance[1:] = np.cumsum(segment_lengths)
+        if num_cameras > 1 and trajectory_distance[-1] > 1e-8:
+            trajectory_u = trajectory_distance / trajectory_distance[-1]
+        else:
+            trajectory_u = np.zeros((num_cameras,), dtype=np.float32)
+
+        aspect = np.where(
+            np.abs(principal_y) > 1e-6,
+            principal_x / principal_y,
+            1.0,
+        ).astype(np.float32)
+        fov = (2.0 * np.arctan(principal_x / np.maximum(focal, 1e-6))).astype(np.float32)
+        camera_colors = (self.camera_colors[:, :3] * 255).astype(np.uint8)
+
+        return {
+            "frame_index": np.asarray(self.all_steps, dtype=np.int32),
+            "tx": positions[:, 0],
+            "ty": positions[:, 1],
+            "tz": positions[:, 2],
+            "forward_x": forward[:, 0],
+            "forward_y": forward[:, 1],
+            "forward_z": forward[:, 2],
+            "up_x": up[:, 0],
+            "up_y": up[:, 1],
+            "up_z": up[:, 2],
+            "right_x": right[:, 0],
+            "right_y": right[:, 1],
+            "right_z": right[:, 2],
+            "qw": quaternions[:, 0],
+            "qx": quaternions[:, 1],
+            "qy": quaternions[:, 2],
+            "qz": quaternions[:, 3],
+            "r00": rotations[:, 0, 0],
+            "r01": rotations[:, 0, 1],
+            "r02": rotations[:, 0, 2],
+            "r10": rotations[:, 1, 0],
+            "r11": rotations[:, 1, 1],
+            "r12": rotations[:, 1, 2],
+            "r20": rotations[:, 2, 0],
+            "r21": rotations[:, 2, 1],
+            "r22": rotations[:, 2, 2],
+            "focal": focal,
+            "principal_x": principal_x,
+            "principal_y": principal_y,
+            "fov": fov,
+            "aspect": aspect,
+            "trajectory_u": trajectory_u.astype(np.float32),
+            "trajectory_distance": trajectory_distance,
+            "color_r": camera_colors[:, 0],
+            "color_g": camera_colors[:, 1],
+            "color_b": camera_colors[:, 2],
+            "display_scale": np.full(
+                (num_cameras,),
+                float(self.glb_cam_scale_slider.value),
+                dtype=np.float32,
+            ),
+            "frustum_thickness": np.full(
+                (num_cameras,),
+                float(self.glb_frustum_thickness_slider.value),
+                dtype=np.float32,
+            ),
+            "trajectory_radius": np.full(
+                (num_cameras,),
+                float(self.glb_trajectory_radius_slider.value),
+                dtype=np.float32,
+            ),
+        }
+
+    @staticmethod
+    def _get_companion_trajectory_ply_path(output_path: str) -> str:
+        """Derive the companion trajectory PLY path from the main export path."""
+        stem, ext = os.path.splitext(output_path)
+        if ext.lower() != ".ply":
+            ext = ".ply"
+        return f"{stem}_trajectory{ext}"
+
+    def _build_export_comments(self) -> List[str]:
+        """Serialize Export 3D UI state into PLY header comments."""
+        return [
+            "generated_by lingbot-map PointCloudViewer",
+            f"export_mode {self.glb_mode_dropdown.value}",
+            f"include_cameras {int(self.glb_show_cam_checkbox.value)}",
+            f"show_trajectory {int(self.glb_trajectory_checkbox.value)}",
+            f"camera_scale {float(self.glb_cam_scale_slider.value):.6f}",
+            f"frustum_thickness {float(self.glb_frustum_thickness_slider.value):.6f}",
+            f"trajectory_radius {float(self.glb_trajectory_radius_slider.value):.6f}",
+            f"sphere_radius {float(self.glb_sphere_radius_slider.value):.6f}",
+            f"max_sphere_points {int(self.glb_max_sphere_pts_slider.value)}",
+            f"opacity {float(self.glb_opacity_slider.value):.6f}",
+            f"saturation_boost {float(self.glb_saturation_slider.value):.6f}",
+            f"brightness_boost {float(self.glb_brightness_slider.value):.6f}",
+            f"vis_threshold {float(self.vis_threshold):.6f}",
+            f"downsample_factor {int(self.downsample_slider.value)}",
+        ]
 
     def _export_glb(self):
         """Export current filtered point clouds and cameras as a GLB file."""
@@ -632,60 +1077,20 @@ class PointCloudViewer:
         self.glb_status.value = "Collecting points..."
         print("Exporting GLB...")
 
-        # Collect all currently visible, filtered points and colors
-        all_points = []
-        all_colors = []
-        for step in self.all_steps:
-            pc = self.pcs[step]["pc"]
-            color = self.pcs[step]["color"]
-            conf = self.pcs[step]["conf"]
-            edge_color = self.pcs[step].get("edge_color", None)
-
-            pts, cols = self.parse_pc_data(
-                pc, color, conf, edge_color, set_border_color=False,
-                downsample_factor=self.downsample_slider.value,
-            )
-            if len(pts) > 0:
-                all_points.append(pts)
-                if cols.dtype != np.uint8:
-                    cols = (np.clip(cols, 0, 1) * 255).astype(np.uint8)
-                all_colors.append(cols)
-
-        if not all_points:
+        payload = self._collect_export_point_payload()
+        if len(payload["points"]) == 0:
             self.glb_status.value = "Error: no points to export"
             return
+        payload = self._apply_export_mode_to_point_payload(payload)
+        vertices = payload["points"]
+        colors_rgb = payload["colors"]
 
-        vertices = np.concatenate(all_points, axis=0)
-        colors_rgb = np.concatenate(all_colors, axis=0)
-
-        # --- Color enhancement ---
-        colors_float = colors_rgb.astype(np.float32) / 255.0
-
-        sat_boost = self.glb_saturation_slider.value
-        if sat_boost != 1.0:
-            gray = colors_float.mean(axis=1, keepdims=True)
-            colors_float = gray + sat_boost * (colors_float - gray)
-
-        bri_boost = self.glb_brightness_slider.value
-        if bri_boost != 1.0:
-            colors_float = colors_float * bri_boost
-
-        colors_float = np.clip(colors_float, 0.0, 1.0)
-
-        # --- Opacity ---
-        # Simulate opacity by blending colors toward white (works in all viewers).
-        # For Spheres mode, also set true alpha for viewers that support it.
-        alpha = self.glb_opacity_slider.value
-        if alpha < 1.0:
-            bg = np.ones_like(colors_float)  # white background
-            colors_float = colors_float * alpha + bg * (1.0 - alpha)
-            colors_float = np.clip(colors_float, 0.0, 1.0)
-
-        colors_u8 = (colors_float * 255).astype(np.uint8)
+        colors_u8, alpha_u8 = self._apply_export_color_adjustments(colors_rgb)
+        alpha = float(self.glb_opacity_slider.value)
         colors_rgba = np.concatenate([
             colors_u8,
-            np.full((len(colors_u8), 1), int(alpha * 255), dtype=np.uint8),
-        ], axis=1)  # (N, 4)
+            alpha_u8[:, None],
+        ], axis=1)
 
         # Compute scene scale for camera sizing
         lo = np.percentile(vertices, 5, axis=0)
@@ -698,15 +1103,7 @@ class PointCloudViewer:
         export_mode = self.glb_mode_dropdown.value
         if export_mode == "Spheres":
             self.glb_status.value = "Building spheres..."
-            max_pts = int(self.glb_max_sphere_pts_slider.value)
-            radius = self.glb_sphere_radius_slider.value
-
-            # Subsample if too many points
-            if len(vertices) > max_pts:
-                idx = np.random.choice(len(vertices), max_pts, replace=False)
-                idx.sort()
-                vertices = vertices[idx]
-                colors_rgba = colors_rgba[idx]
+            radius = float(self.glb_sphere_radius_slider.value)
 
             sphere_template = trimesh.creation.icosphere(subdivisions=1, radius=radius)
             n_verts_per = len(sphere_template.vertices)
@@ -724,10 +1121,11 @@ class PointCloudViewer:
                 all_face_colors[f_off:f_off + n_faces_per] = rgba
 
             mesh = trimesh.Trimesh(vertices=all_verts, faces=all_faces)
-            mesh.visual.face_colors = all_face_colors
+            mesh_visual = cast(Any, mesh.visual)
+            mesh_visual.face_colors = all_face_colors
             # Enable alpha blending in glTF material for true transparency
             if alpha < 1.0:
-                mesh.visual.material.alphaMode = 'BLEND'
+                mesh_visual.material.alphaMode = "BLEND"
             scene_3d.add_geometry(mesh)
             print(f"Spheres mode: {len(vertices):,} spheres, {len(all_faces):,} faces")
         else:
@@ -755,7 +1153,11 @@ class PointCloudViewer:
                 cam_positions.append(np.array(t, dtype=np.float64))
 
                 rgba_c = colormap(i / max(num_cameras - 1, 1))
-                cam_color = tuple(int(255 * x) for x in rgba_c[:3])
+                cam_color = (
+                    int(255 * rgba_c[0]),
+                    int(255 * rgba_c[1]),
+                    int(255 * rgba_c[2]),
+                )
                 integrate_camera_into_scene(
                     scene_3d, c2w, cam_color,
                     effective_cam_scale,
@@ -773,16 +1175,9 @@ class PointCloudViewer:
                     scene_3d.add_geometry(traj_mesh)
 
         # Align scene using first camera extrinsic
-        if self.cam_dict is not None and len(self.all_steps) > 0:
+        extrinsics = self._get_scene_alignment_extrinsics()
+        if len(extrinsics) > 0:
             from lingbot_map.vis.glb_export import apply_scene_alignment
-            step0 = self.all_steps[0]
-            R0 = self.cam_dict["R"][step0] if "R" in self.cam_dict else np.eye(3)
-            t0 = self.cam_dict["t"][step0] if "t" in self.cam_dict else np.zeros(3)
-            c2w_0 = np.eye(4)
-            c2w_0[:3, :3] = R0
-            c2w_0[:3, 3] = t0
-            w2c_0 = np.linalg.inv(c2w_0)
-            extrinsics = np.expand_dims(w2c_0, 0)
             scene_3d = apply_scene_alignment(scene_3d, extrinsics)
 
         output_path = self.glb_output_path.value
@@ -792,6 +1187,145 @@ class PointCloudViewer:
         mode_str = f"spheres r={self.glb_sphere_radius_slider.value}" if export_mode == "Spheres" else "points"
         self.glb_status.value = f"Saved: {output_path} ({n_pts:,} {mode_str})"
         print(f"GLB exported to {output_path} ({n_pts:,} {mode_str})")
+
+    def _export_ply(self):
+        """Export the filtered point cloud, plus a companion trajectory PLY."""
+        from lingbot_map.vis.glb_export import (
+            apply_scene_alignment_to_directions,
+            apply_scene_alignment_to_vertices,
+            save_point_cloud_to_ply,
+        )
+
+        self.ply_status.value = "Collecting points..."
+        print("Exporting PLY...")
+
+        payload = self._collect_export_point_payload()
+        if len(payload["points"]) == 0:
+            self.ply_status.value = "Error: no points to export"
+            return
+        payload = self._apply_export_mode_to_point_payload(payload)
+
+        colors_u8, alpha_u8 = self._apply_export_color_adjustments(payload["colors"])
+        vertices = payload["points"]
+        normals = payload["normals"]
+        extrinsics = self._get_scene_alignment_extrinsics()
+        if len(extrinsics) > 0:
+            vertices = apply_scene_alignment_to_vertices(vertices, extrinsics)
+            normals = apply_scene_alignment_to_directions(normals, extrinsics)
+
+        camera_payload = self._build_camera_export_payload()
+        vertex_properties: Dict[str, np.ndarray] = {
+            "confidence": payload["confidence"],
+            "frame_index": payload["frame_index"],
+            "pixel_row": payload["pixel_row"],
+            "pixel_col": payload["pixel_col"],
+            "render_radius": payload["render_radius"],
+        }
+
+        output_path = self.ply_output_path.value
+        save_point_cloud_to_ply(
+            vertices,
+            colors_u8,
+            output_path,
+            normals=normals,
+            alpha=alpha_u8,
+            extra_vertex_properties=vertex_properties,
+            comments=self._build_export_comments(),
+        )
+
+        saved_trajectory_path = None
+        saved_trajectory_poses = 0
+        if self.glb_show_cam_checkbox.value and camera_payload is not None:
+            trajectory_path = self._get_companion_trajectory_ply_path(output_path)
+            trajectory_points = np.stack(
+                [camera_payload["tx"], camera_payload["ty"], camera_payload["tz"]],
+                axis=1,
+            ).astype(np.float32)
+            trajectory_colors = np.stack(
+                [camera_payload["color_r"], camera_payload["color_g"], camera_payload["color_b"]],
+                axis=1,
+            ).astype(np.uint8)
+            trajectory_normals = np.stack(
+                [
+                    camera_payload["forward_x"],
+                    camera_payload["forward_y"],
+                    camera_payload["forward_z"],
+                ],
+                axis=1,
+            ).astype(np.float32)
+            trajectory_vertex_properties = {
+                key: value
+                for key, value in camera_payload.items()
+                if key not in {"tx", "ty", "tz", "color_r", "color_g", "color_b", "forward_x", "forward_y", "forward_z"}
+            }
+            trajectory_comments = self._build_export_comments() + [
+                "trajectory_vertices one_per_camera_pose",
+                f"source_pointcloud {os.path.basename(output_path)}",
+            ]
+            save_point_cloud_to_ply(
+                trajectory_points,
+                trajectory_colors,
+                trajectory_path,
+                normals=trajectory_normals,
+                extra_vertex_properties=trajectory_vertex_properties,
+                comments=trajectory_comments,
+            )
+            saved_trajectory_path = trajectory_path
+            saved_trajectory_poses = len(camera_payload["frame_index"])
+
+        if saved_trajectory_path is not None:
+            self.ply_status.value = (
+                f"Saved: {output_path} ({len(vertices):,} points) + "
+                f"{saved_trajectory_path} ({saved_trajectory_poses:,} poses)"
+            )
+            print(
+                f"PLY exported to {output_path} ({len(vertices):,} points) "
+                f"and {saved_trajectory_path} ({saved_trajectory_poses:,} poses)"
+            )
+        else:
+            self.ply_status.value = f"Saved: {output_path} ({len(vertices):,} points)"
+            print(f"PLY exported to {output_path} ({len(vertices):,} points)")
+
+    def _collect_export_point_payload(self) -> Dict[str, np.ndarray]:
+        """Collect the filtered point-cloud payload used by GLB and PLY export."""
+        all_points = []
+        all_colors = []
+        all_normals = []
+        all_confidence = []
+        all_frame_indices = []
+        all_pixel_rows = []
+        all_pixel_cols = []
+        for step in self.all_steps:
+            frame_payload = self._extract_frame_export_samples(step)
+            if len(frame_payload["points"]) == 0:
+                continue
+            all_points.append(frame_payload["points"])
+            all_colors.append(frame_payload["colors"])
+            all_normals.append(frame_payload["normals"])
+            all_confidence.append(frame_payload["confidence"])
+            all_frame_indices.append(frame_payload["frame_index"])
+            all_pixel_rows.append(frame_payload["pixel_row"])
+            all_pixel_cols.append(frame_payload["pixel_col"])
+
+        if not all_points:
+            return {
+                "points": np.zeros((0, 3), dtype=np.float32),
+                "colors": np.zeros((0, 3), dtype=np.uint8),
+                "normals": np.zeros((0, 3), dtype=np.float32),
+                "confidence": np.zeros((0,), dtype=np.float32),
+                "frame_index": np.zeros((0,), dtype=np.int32),
+                "pixel_row": np.zeros((0,), dtype=np.int32),
+                "pixel_col": np.zeros((0,), dtype=np.int32),
+            }
+        return {
+            "points": np.concatenate(all_points, axis=0),
+            "colors": np.concatenate(all_colors, axis=0),
+            "normals": np.concatenate(all_normals, axis=0),
+            "confidence": np.concatenate(all_confidence, axis=0),
+            "frame_index": np.concatenate(all_frame_indices, axis=0),
+            "pixel_row": np.concatenate(all_pixel_rows, axis=0),
+            "pixel_col": np.concatenate(all_pixel_cols, axis=0),
+        }
 
     @staticmethod
     def _build_trajectory_tube(positions, radius, colormap, num_cameras):
@@ -852,15 +1386,8 @@ class PointCloudViewer:
         return trimesh.util.concatenate(segments)
 
     def update_frame_visibility(self):
-        """Show all frames up to the current timestep (or only the current one in 4D mode)."""
-        if not hasattr(self, 'frame_nodes') or not hasattr(self, 'gui_timestep'):
-            return
-
-        current_timestep = self.gui_timestep.value
-        for i, frame_node in enumerate(self.frame_nodes):
-            frame_node.visible = (
-                i <= current_timestep if not self.fourd else i == current_timestep
-            )
+        """Refresh the active browser scene for the current timestep."""
+        self._refresh_active_scene()
 
     def _move_to_camera(self, frame_idx: int, smooth: bool = True):
         """Move viewer camera to match reconstructed camera at given frame."""
@@ -1045,7 +1572,7 @@ class PointCloudViewer:
             normalized_indices = np.array(list(range(num_cameras))) / (num_cameras - 1)
         else:
             normalized_indices = np.array([0.0])
-        cmap = cm.get_cmap('viridis')
+        cmap = colormaps.get_cmap('viridis')
         self.camera_colors = cmap(normalized_indices)
         return pcs, step_list
 
@@ -1095,28 +1622,6 @@ class PointCloudViewer:
 
         return pred_pts, color
 
-    def add_pc(self, step):
-        """Add point cloud for a frame."""
-        pc = self.pcs[step]["pc"]
-        color = self.pcs[step]["color"]
-        conf = self.pcs[step]["conf"]
-        edge_color = self.pcs[step].get("edge_color", None)
-
-        pred_pts, color = self.parse_pc_data(
-            pc, color, conf, edge_color, set_border_color=True,
-            downsample_factor=self.downsample_slider.value
-        )
-
-        self.vis_pts_list.append(pred_pts)
-        self.pc_handles.append(
-            self.server.scene.add_point_cloud(
-                name=f"/frames/{step}/pred_pts",
-                points=pred_pts,
-                colors=color,
-                point_size=self.psize_slider.value,
-            )
-        )
-
     def add_camera(self, step):
         """Add camera visualization for a frame."""
         cam = self.cam_dict
@@ -1128,28 +1633,18 @@ class PointCloudViewer:
         q = tf.SO3.from_matrix(R).wxyz
         fov = 2 * np.arctan(pp[0] / focal)
         aspect = pp[0] / pp[1]
-        self.traj_list.append((q, t))
 
         step_index = self.all_steps.index(step) if step in self.all_steps else 0
         camera_color = self.camera_colors[step_index]
         camera_color_rgb = tuple((camera_color[:3] * 255).astype(int))
 
-        self.server.scene.add_frame(
-            f"/frames/{step}/camera_frame",
-            wxyz=q,
-            position=t,
-            axes_length=0.05,
-            axes_radius=0.002,
-            origin_radius=0.002,
-        )
-
         frustum_handle = self.server.scene.add_camera_frustum(
-            name=f"/frames/{step}/camera",
+            name=f"/active/cameras/{step}",
             fov=fov,
             aspect=aspect,
             wxyz=q,
             position=t,
-            scale=0.03,
+            scale=self.camsize_slider.value,
             color=camera_color_rgb,
         )
 
@@ -1172,9 +1667,25 @@ class PointCloudViewer:
             )
             gui_next_frame = self.server.gui.add_button("Next Step", disabled=False)
             gui_prev_frame = self.server.gui.add_button("Prev Step", disabled=False)
-            gui_playing = self.server.gui.add_checkbox("Playing", True)
+            gui_playing = self.server.gui.add_checkbox("Playing", False)
             gui_framerate = self.server.gui.add_slider("FPS", min=1, max=60, step=0.1, initial_value=20)
             gui_framerate_options = self.server.gui.add_button_group("FPS options", ("10", "20", "30", "60"))
+            self.gui_history_frames = self.server.gui.add_slider(
+                "Visible History Frames",
+                min=0,
+                max=self.max_history_frames,
+                step=1,
+                initial_value=0,
+                hint="Frames retained in the browser scene. Capped to keep Chrome responsive.",
+            )
+            self.gui_max_render_points = self.server.gui.add_slider(
+                "Max Browser Points",
+                min=50_000,
+                max=1_000_000,
+                step=50_000,
+                initial_value=self.default_max_render_points,
+                hint="Hard cap on rendered points after history aggregation.",
+            )
 
         @gui_next_frame.on_click
         def _(_) -> None:
@@ -1194,45 +1705,34 @@ class PointCloudViewer:
         def _(_) -> None:
             gui_framerate.value = int(gui_framerate_options.value)
 
-        prev_timestep = self.gui_timestep.value
-
         @self.gui_timestep.on_update
         def _(_) -> None:
-            nonlocal prev_timestep
             current_timestep = self.gui_timestep.value
+            if self.frame_visibility_mode == "all":
+                self.max_drawn_frame_idx = max(self.max_drawn_frame_idx, int(current_timestep))
 
             if self.current_frame_image is not None and hasattr(self, 'original_images'):
                 if current_timestep < len(self.original_images):
                     self.current_frame_image.image = self.original_images[current_timestep]
 
-            with self.server.atomic():
-                self.frame_nodes[current_timestep].visible = True
-                self.frame_nodes[prev_timestep].visible = False
-            self.server.flush()
+            self.update_frame_visibility()
 
-            prev_timestep = current_timestep
+        @self.gui_history_frames.on_update
+        def _(_) -> None:
+            self.update_frame_visibility()
 
-        self.server.scene.add_frame("/frames", show_axes=False)
-        self.frame_nodes = []
-        for i in range(self.num_frames):
-            step = self.all_steps[i]
-            self.frame_nodes.append(
-                self.server.scene.add_frame(f"/frames/{step}", show_axes=False)
-            )
-            self.add_pc(step)
-            if self.show_camera:
-                downsample_factor = int(self.camera_downsample_slider.value)
-                if i % downsample_factor == 0:
-                    self.add_camera(step)
+        @self.gui_max_render_points.on_update
+        def _(_) -> None:
+            self.update_frame_visibility()
 
-        prev_timestep = self.gui_timestep.value
+        # Start paused on the first frame so large sequences do not immediately
+        # trigger browser-side playback / cumulative point-cloud rendering.
+        self.gui_history_frames.disabled = True
+        self.update_frame_visibility()
+
         while True:
-            if self.on_replay:
-                pass
-            else:
-                if gui_playing.value:
-                    self.gui_timestep.value = (self.gui_timestep.value + 1) % self.num_frames
-                self.update_frame_visibility()
+            if (not self.on_replay) and gui_playing.value:
+                self.gui_timestep.value = (self.gui_timestep.value + 1) % self.num_frames
 
             time.sleep(1.0 / gui_framerate.value)
 
