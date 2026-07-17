@@ -22,6 +22,7 @@ from typing import List, Optional, Dict, Any, Tuple
 import numpy as np
 import torch
 import cv2
+import matplotlib
 import matplotlib.cm as cm
 from tqdm.auto import tqdm
 
@@ -1045,7 +1046,7 @@ class PointCloudViewer:
             normalized_indices = np.array(list(range(num_cameras))) / (num_cameras - 1)
         else:
             normalized_indices = np.array([0.0])
-        cmap = cm.get_cmap('viridis')
+        cmap = matplotlib.colormaps.get_cmap('viridis')
         self.camera_colors = cmap(normalized_indices)
         return pcs, step_list
 
