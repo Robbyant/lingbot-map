@@ -1,0 +1,18 @@
+model: lingbot_map
+env: lingbot-map
+_checkpoint: /path/to/lingbot-map.pt
+_device: cuda
+_mode: streaming
+_use_amp: true
+_use_sdpa: false  # Force FlashInfer backend (paged KV cache attention)
+_image_size: 518
+_patch_size: 14
+_enable_3d_rope: true
+_num_scale_frames: 8
+_max_frame_num: 1024
+_kv_cache_sliding_window: 64
+_kv_cache_scale_frames: 8
+_keyframe_interval: auto         # auto = 1 if frames<=threshold else ceil(N/threshold); or a fixed int
+_auto_keyframe_threshold: 320    # frame-count threshold driving the 'auto' keyframe_interval (streaming mode)
+_area_budget: 255000
+_align: 14

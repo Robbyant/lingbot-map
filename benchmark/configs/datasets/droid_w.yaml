@@ -1,0 +1,3 @@
+dataset: droid_w
+raw_data_root: /path/to/DROID-W
+_load_img_size: 518

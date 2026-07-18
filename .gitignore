@@ -11,3 +11,9 @@ CLAUDE.md
 .claude/
 .agents/
 skyseg.onnx
+.claude-remote
+weights/
+.DS_Store
+**/.DS_Store
+docs/
+

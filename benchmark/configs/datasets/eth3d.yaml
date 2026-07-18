@@ -1,0 +1,8 @@
+dataset: eth3d
+raw_data_root: /path/to/eth3d
+_load_img_size: 518
+evaluation:
+  depth:
+    gt_clip:
+      min: 0.0
+      max: 100.0

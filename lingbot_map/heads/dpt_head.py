@@ -646,7 +646,7 @@ class FeatureFusionBlock_slam(nn.Module):
 
         self.resConfUnit1 = ResidualConvUnit(features, activation, bn)
         self.resConfUnit2 = ResidualConvUnit(features, activation, bn)
-        
+
         self.skip_add = nn.quantized.FloatFunctional()
 
         self.size=size

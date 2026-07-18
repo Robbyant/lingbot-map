@@ -1,0 +1,3 @@
+dataset: vbr
+raw_data_root: /path/to/vbr
+_target_size: [504, 280]

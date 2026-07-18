@@ -74,10 +74,10 @@ class Block(nn.Module):
 
         self.sample_drop_ratio = drop_path
 
-    def forward(self, x: Tensor, pos=None, enable_ulysses_cp=False,
+    def forward(self, x: Tensor, pos=None,
                 num_patches=None, num_special=None, num_frames=None, enable_3d_rope=False) -> Tensor:
         def attn_residual_func(x: Tensor, pos=None) -> Tensor:
-            return self.ls1(self.attn(self.norm1(x), pos=pos, enable_ulysses_cp=enable_ulysses_cp,
+            return self.ls1(self.attn(self.norm1(x), pos=pos,
                                      num_patches=num_patches, num_special=num_special, num_frames=num_frames,
                                      enable_3d_rope=enable_3d_rope))
 
@@ -230,7 +230,6 @@ class FlashInferBlock(nn.Module):
         self,
         x: Tensor,
         pos=None,
-        enable_ulysses_cp=False,
         num_patches=None,
         num_special=None,
         num_frames=None,
@@ -248,20 +247,36 @@ class FlashInferBlock(nn.Module):
             manager = kv_cache
             # Compiled: norm1 + qkv linear + reshape + q_norm + k_norm + RoPE + format
             q_nhd, k_nhd, v_nhd = self.attn_pre(x, pos=pos, enable_3d_rope=enable_3d_rope)
-            # Eager: write frame K/V to paged cache
-            manager.append_frame(global_idx, k_nhd, v_nhd)
-            # CPU-only: update eviction state (deque ops, no GPU kernel)
-            manager.evict_frames(
-                block_idx=global_idx,
-                scale_frames=self.attn.kv_cache_scale_frames,
-                sliding_window=self.attn.kv_cache_sliding_window,
-                cross_frame_special=self.attn.kv_cache_cross_frame_special,
-                include_scale_frames=self.attn.kv_cache_include_scale_frames,
-                camera_only=self.attn.kv_cache_camera_only,
-                num_register_tokens=num_register_tokens,
-            )
-            # Eager: FlashInfer BatchPrefillWithPagedKVCacheWrapper
-            attn_x = manager.compute_attention(global_idx, q_nhd)
+
+            # Non-keyframe path: attend to cache+current but don't persist the
+            # current frame.  FlashInfer paged attention can only read from the
+            # paged cache, so we temporarily append (with eviction deferred so
+            # it stays clean), attend, and then roll back the append.  Mirrors
+            # the ``skip_append`` behavior of the SDPA dict path.
+            skip_append = getattr(manager, '_skip_append', False)
+            if skip_append:
+                prev_defer = manager._defer_eviction
+                manager._defer_eviction = True
+                manager.append_frame(global_idx, k_nhd, v_nhd)
+                attn_x = manager.compute_attention(global_idx, q_nhd)
+                manager.rollback_last_frame(global_idx)
+                manager._defer_eviction = prev_defer
+            else:
+                # Eager: write frame K/V to paged cache
+                manager.append_frame(global_idx, k_nhd, v_nhd)
+                # CPU-only: update eviction state (deque ops, no GPU kernel)
+                manager.evict_frames(
+                    block_idx=global_idx,
+                    scale_frames=self.attn.kv_cache_scale_frames,
+                    sliding_window=self.attn.kv_cache_sliding_window,
+                    cross_frame_special=self.attn.kv_cache_cross_frame_special,
+                    include_scale_frames=self.attn.kv_cache_include_scale_frames,
+                    camera_only=self.attn.kv_cache_camera_only,
+                    num_register_tokens=num_register_tokens,
+                )
+                # Eager: FlashInfer BatchPrefillWithPagedKVCacheWrapper
+                attn_x = manager.compute_attention(global_idx, q_nhd)
+
             # [tpf, H, D] -> [B, tpf, C]  (B=1 in streaming, contiguous from FlashInfer output)
             attn_x = attn_x.reshape(x.shape[0], q_nhd.shape[0],
                                     self.attn.num_heads * self.attn.head_dim)
@@ -273,7 +288,6 @@ class FlashInferBlock(nn.Module):
             x = x + self.ls1(self.attn(
                 self.norm1(x),
                 pos=pos,
-                enable_ulysses_cp=enable_ulysses_cp,
                 num_patches=num_patches,
                 num_special=num_special,
                 num_frames=num_frames,
@@ -400,14 +414,14 @@ class CameraBlock(nn.Module):
 
         return block_mask
 
-    def forward(self, x: Tensor, pos=None, video_mask=None, num_frames=0, frame_seqlen=0, kv_cache=None, current_start=0, current_end=0, global_idx=0, num_frame_per_block=8, num_frame_for_scale=-1, sliding_window_size=None, enable_ulysses_cp=False, full_attention=False, enable_3d_rope=False, is_scale_frames=False) -> Tensor:
+    def forward(self, x: Tensor, pos=None, video_mask=None, num_frames=0, frame_seqlen=0, kv_cache=None, current_start=0, current_end=0, global_idx=0, num_frame_per_block=8, num_frame_for_scale=-1, sliding_window_size=None, full_attention=False, enable_3d_rope=False, is_scale_frames=False) -> Tensor:
         # Use passed sliding_window_size if provided, otherwise use self.sliding_window_size
         effective_sliding_window_size = sliding_window_size if sliding_window_size is not None else self.sliding_window_size
 
         # Fast path for full attention (camera head) - skip mask computation
         if full_attention:
             def attn_residual_func(x: Tensor, pos=None) -> Tensor:
-                return self.ls1(self.attn(self.norm1(x), pos=pos, full_attention=True, enable_ulysses_cp=enable_ulysses_cp, enable_3d_rope=enable_3d_rope))
+                return self.ls1(self.attn(self.norm1(x), pos=pos, full_attention=True, enable_3d_rope=enable_3d_rope))
 
             def ffn_residual_func(x: Tensor) -> Tensor:
                 return self.ls2(self.mlp(self.norm2(x)))
@@ -420,13 +434,17 @@ class CameraBlock(nn.Module):
                 x = x + ffn_residual_func(x)
             return x
 
-        mask_block = self._prepare_blockwise_causal_attn_mask(
+        # Skip mask creation when using KV cache (streaming mode) — the streaming
+        # attention path in CausalAttention ignores block_mask entirely.
+        mask_block = None
+        if kv_cache is None:
+            mask_block = self._prepare_blockwise_causal_attn_mask(
                 device=x.device, num_frames=num_frames, frame_seqlen=frame_seqlen, num_frame_per_block=num_frame_per_block)
 
 
         def attn_residual_func(x: Tensor, pos=None) -> Tensor:
             return self.ls1(self.attn(self.norm1(x), pos=pos, block_mask=mask_block, frame_seqlen=frame_seqlen, video_mask=video_mask, current_start=current_start, current_end=current_end, kv_cache=kv_cache, global_idx=global_idx, num_frame_per_block=num_frame_per_block, num_frame_for_scale=num_frame_for_scale, sliding_window_size=effective_sliding_window_size, attend_to_scale_frames=self.attend_to_scale_frames, num_random_frames=self.num_random_frames,
-                                      enable_ulysses_cp=enable_ulysses_cp, enable_3d_rope=enable_3d_rope, is_scale_frames=is_scale_frames))
+                                      enable_3d_rope=enable_3d_rope, is_scale_frames=is_scale_frames))
 
         def ffn_residual_func(x: Tensor) -> Tensor:
             return self.ls2(self.mlp(self.norm2(x)))
@@ -489,13 +507,13 @@ class SDPABlock(nn.Module):
         self.drop_path2 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
         self.sample_drop_ratio = drop_path
 
-    def forward(self, x: Tensor, pos=None, enable_ulysses_cp=False,
+    def forward(self, x: Tensor, pos=None,
                 num_patches=None, num_special=None, num_frames=None, enable_3d_rope=False,
                 kv_cache=None, global_idx=0, num_frame_per_block=1,
                 num_frame_for_scale=-1, num_register_tokens=4) -> Tensor:
         def attn_residual_func(x, pos=None):
             return self.ls1(self.attn(
-                self.norm1(x), pos=pos, enable_ulysses_cp=enable_ulysses_cp,
+                self.norm1(x), pos=pos,
                 num_patches=num_patches, num_special=num_special, num_frames=num_frames,
                 enable_3d_rope=enable_3d_rope, kv_cache=kv_cache, global_idx=global_idx,
                 num_frame_per_block=num_frame_per_block, num_frame_for_scale=num_frame_for_scale,

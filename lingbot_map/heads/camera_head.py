@@ -38,7 +38,6 @@ class CameraHead(nn.Module):
         trans_act: str = "linear",
         quat_act: str = "linear",
         fl_act: str = "relu",  # Field of view activations: ensures FOV values are positive.
-        enable_ulysses_cp=False,
     ):
         super().__init__()
 
@@ -51,8 +50,6 @@ class CameraHead(nn.Module):
         self.quat_act = quat_act
         self.fl_act = fl_act
         self.trunk_depth = trunk_depth
-
-        self.enable_ulysses_cp = enable_ulysses_cp
 
         # Build the trunk using a sequence of transformer blocks.
         self.trunk = nn.Sequential(
@@ -130,9 +127,8 @@ class CameraHead(nn.Module):
             pose_tokens_modulated = gate_msa * modulate(self.adaln_norm(pose_tokens), shift_msa, scale_msa)
             pose_tokens_modulated = pose_tokens_modulated + pose_tokens
 
-            # Apply trunk blocks with enable_ulysses_cp
             for block in self.trunk:
-                pose_tokens_modulated = block(pose_tokens_modulated, enable_ulysses_cp=self.enable_ulysses_cp)
+                pose_tokens_modulated = block(pose_tokens_modulated)
             # Compute the delta update for the pose encoding.
             pred_pose_enc_delta = self.pose_branch(self.trunk_norm(pose_tokens_modulated))
 
@@ -181,7 +177,6 @@ class CameraCausalHead(nn.Module):
         sliding_window_size: int = -1,
         attend_to_scale_frames: bool = False,
         num_random_frames: int = 0,
-        enable_ulysses_cp: bool = False,
         attn_class: str = "flexflashattn_varlen",
         # KV cache parameters
         kv_cache_sliding_window: int = 64,
@@ -206,7 +201,6 @@ class CameraCausalHead(nn.Module):
         self.fl_act = fl_act
         self.trunk_depth = trunk_depth
         self.sliding_window_size = sliding_window_size
-        self.enable_ulysses_cp = enable_ulysses_cp
         self.num_heads = num_heads
 
         # 3D RoPE for temporal position encoding
@@ -253,19 +247,6 @@ class CameraCausalHead(nn.Module):
         self.kv_cache = None
         self.pos_cache = None
         self.frame_idx = 0
-        self.cp_size = 1
-
-        ## Get cp size if enable ulysses cp
-        if self.enable_ulysses_cp:
-            from torchtitan.distributed.sequence_parallel import (
-            init_sequence_parallel,
-            get_ulysses_sequence_parallel_rank,
-            get_ulysses_sequence_parallel_world_size,
-        )
-
-            self.cp_size = get_ulysses_sequence_parallel_world_size()
-
-
 
     def clean_kv_cache(self):
         del self.kv_cache
@@ -348,14 +329,14 @@ class CameraCausalHead(nn.Module):
                 f_end = None  # Will use ppf as frame count
 
             pos3d = self.rope3d(
-                ppf=S * self.cp_size,  # Total frames (with CP)
+                ppf=S,                  # Total frames
                 pph=1,                  # height = 1 (camera token)
                 ppw=1,                  # width = 1 (camera token)
                 patch_start_idx=0,      # No special tokens before
                 device=pose_tokens.device,
                 f_start=f_start,
                 f_end=f_end,
-            )  # Returns [1, 1, S*cp_size, head_dim//2] complex
+            )  # Returns [1, 1, S, head_dim//2] complex
 
         for i in range(num_iterations):
             # Use a learned empty pose for the first iteration.
@@ -374,7 +355,7 @@ class CameraCausalHead(nn.Module):
             pose_tokens_modulated = pose_tokens_modulated + pose_tokens
 
             for idx in range(self.trunk_depth):
-                pose_tokens_modulated = self.trunk[idx](pose_tokens_modulated, pos=pos3d, video_mask=mask, num_frames=S*self.cp_size, frame_seqlen=1, kv_cache=self.kv_cache[i] if self.kv_cache is not None else None, global_idx=idx, num_frame_per_block=num_frame_per_block, num_frame_for_scale=num_frame_for_scale, sliding_window_size=sliding_window_size, enable_ulysses_cp=self.enable_ulysses_cp, enable_3d_rope=self.enable_3d_rope, is_scale_frames=is_scale_frames)
+                pose_tokens_modulated = self.trunk[idx](pose_tokens_modulated, pos=pos3d, video_mask=mask, num_frames=S, frame_seqlen=1, kv_cache=self.kv_cache[i] if self.kv_cache is not None else None, global_idx=idx, num_frame_per_block=num_frame_per_block, num_frame_for_scale=num_frame_for_scale, sliding_window_size=sliding_window_size, enable_3d_rope=self.enable_3d_rope, is_scale_frames=is_scale_frames)
             # Compute the delta update for the pose encoding.
             pred_pose_enc_delta = self.pose_branch(self.trunk_norm(pose_tokens_modulated))
 

@@ -1,0 +1,8 @@
+dataset: seven_scenes
+raw_data_root: /path/to/7-scenes
+_split: test
+sampling:
+  strategy: sequence
+  start_idx: 0
+  end_idx: -1
+  stride: 5

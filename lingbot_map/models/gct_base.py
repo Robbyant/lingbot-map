@@ -54,8 +54,6 @@ class GCTBase(nn.Module, PyTorchModelHubMixin, ABC):
         enable_camera_sliding_window: bool = False,
         # 3D RoPE
         enable_3d_rope: bool = False,
-        # Context Parallelism (kept for checkpoint compatibility but not used)
-        enable_ulysses_cp: bool = False,
         # Normalization
         enable_normalize: bool = False,
         # Prediction normalization
@@ -73,7 +71,6 @@ class GCTBase(nn.Module, PyTorchModelHubMixin, ABC):
         self.patch_embed = patch_embed
         self.disable_global_rope = disable_global_rope
 
-        self.enable_ulysses_cp = False  # CP disabled in standalone package
         self.enable_normalize = enable_normalize
         self.pred_normalization = pred_normalization
         self.pred_normalization_detach_scale = pred_normalization_detach_scale
@@ -149,7 +146,6 @@ class GCTBase(nn.Module, PyTorchModelHubMixin, ABC):
         view_graphs: Optional[torch.Tensor] = None,
         causal_graphs: Optional[Union[torch.Tensor, List[np.ndarray]]] = None,
         ordered_video: Optional[torch.Tensor] = None,
-        is_cp_sliced: bool = False,
     ) -> tuple:
         pass
 

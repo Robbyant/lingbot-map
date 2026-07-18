@@ -1,0 +1,24 @@
+# ETH3D — lingbot_map trajectory + point-cloud evaluation.
+# DA3 (DepthAnything3) split; see configs/datasets/eth3d.yaml.
+workspace: /path/to/workspace/eth3d
+
+datasets:
+  - eth3d
+
+methods:
+  - lingbot_map
+
+evaluation:
+  traj:
+    enable: true
+    vis: true
+  auc:
+    enable: true
+    vis: true
+    aggregation: both
+  depth:
+    enable: false
+  points:
+    enable: true
+    vis: false
+    icp_threshold: 0.1

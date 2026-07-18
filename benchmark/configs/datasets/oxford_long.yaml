@@ -1,0 +1,12 @@
+dataset: oxford_spires
+raw_data_root: /path/to/oxford_spires
+sampling:
+  strategy: sequence
+  stride: 1
+evaluation:
+  depth:
+    gt_clip:
+      min: 0.0
+      max: 200.0
+  points:
+    icp_threshold: 0.5

@@ -1,0 +1,21 @@
+# Oxford Spires — lingbot_map trajectory evaluation.
+workspace: /path/to/workspace/oxford
+
+datasets:
+  - oxford
+
+methods:
+  - lingbot_map
+
+evaluation:
+  traj:
+    enable: true
+    vis: true
+  auc:
+    enable: true
+    vis: true
+    aggregation: both
+  depth:
+    enable: false
+  points:
+    enable: false

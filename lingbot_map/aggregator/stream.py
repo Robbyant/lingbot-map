@@ -492,7 +492,6 @@ class AggregatorStream(AggregatorBase):
                 tokens = self.global_blocks[global_idx](
                     tokens,
                     pos=pos,
-                    enable_ulysses_cp=False,
                     num_patches=num_patches,
                     num_special=self.num_special_tokens,
                     num_frames=num_frames,
@@ -509,7 +508,6 @@ class AggregatorStream(AggregatorBase):
                 tokens = self.global_blocks[global_idx](
                     tokens,
                     pos=pos,
-                    enable_ulysses_cp=False,
                     num_patches=num_patches,
                     num_special=self.num_special_tokens,
                     num_frames=num_frames,

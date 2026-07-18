@@ -1,0 +1,3 @@
+dataset: kitti
+raw_data_root: /path/to/kitti/dataset
+_target_size: [504, 280]

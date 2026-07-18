@@ -1,0 +1,10 @@
+dataset: neural_rgbd
+raw_data_root: /path/to/neural_rgbd_data
+sampling:
+  strategy: sequence
+  stride: 5
+evaluation:
+  depth:
+    gt_clip:
+      min: 0.0
+      max: 10.0

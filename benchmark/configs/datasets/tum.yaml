@@ -1,0 +1,8 @@
+dataset: tum
+raw_data_root: /path/to/TUM-RGBD
+_load_img_size: 518
+evaluation:
+  depth:
+    enable: false
+  points:
+    enable: false

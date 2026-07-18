@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Point Cloud Viewer</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #1a1a1a; color: #e0e0e0; font-family: -apple-system, sans-serif; font-size: 13px; overflow: hidden; display: flex; height: 100vh; }
+
+/* Sidebar */
+#sidebar { width: 260px; background: #222; padding: 12px; overflow-y: auto; flex-shrink: 0; border-right: 1px solid #333; display: flex; flex-direction: column; gap: 12px; }
+.section { background: #2a2a2a; border-radius: 6px; padding: 10px; }
+.section h3 { font-size: 11px; text-transform: uppercase; color: #888; margin-bottom: 8px; letter-spacing: 0.5px; }
+.row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+.row label { flex: 1; }
+.row input[type=range] { width: 120px; }
+.row input[type=color] { width: 40px; height: 24px; border: none; cursor: pointer; }
+.row select { width: 120px; background: #333; color: #e0e0e0; border: 1px solid #444; border-radius: 3px; padding: 2px 4px; }
+.row .val { width: 45px; text-align: right; color: #aaa; font-size: 11px; }
+input[type=range] { accent-color: #4a9eff; }
+.radio-group { display: flex; gap: 8px; flex-wrap: wrap; }
+.radio-group label { cursor: pointer; font-size: 12px; }
+
+/* Buttons */
+.btn { background: #4a9eff; color: #fff; border: none; border-radius: 4px; padding: 6px 12px; cursor: pointer; font-size: 12px; width: 100%; margin-bottom: 4px; }
+.btn:hover { background: #3a8eef; }
+.btn.danger { background: #e05555; }
+.btn.danger:hover { background: #d04545; }
+.btn.secondary { background: #555; }
+.btn.secondary:hover { background: #666; }
+
+/* Keyframe list */
+#kf-list { max-height: 200px; overflow-y: auto; }
+.kf-item { background: #333; border-radius: 3px; padding: 4px 8px; margin-bottom: 3px; cursor: pointer; font-size: 11px; display: flex; justify-content: space-between; }
+.kf-item:hover { background: #444; }
+
+/* Canvas area */
+#canvas-wrap { flex: 1; position: relative; display: flex; align-items: center; justify-content: center; background: #111; }
+#render-canvas { max-width: 100%; max-height: 100%; object-fit: contain; cursor: grab; }
+#render-canvas.dragging { cursor: grabbing; }
+
+/* Status bar */
+#status { position: absolute; bottom: 8px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.7); color: #aaa; padding: 4px 12px; border-radius: 4px; font-size: 11px; pointer-events: none; }
+
+/* Frame slider */
+#frame-bar { position: absolute; bottom: 40px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.7); padding: 6px 16px; border-radius: 6px; display: flex; align-items: center; gap: 10px; }
+#frame-slider { width: 300px; }
+
+/* Toast */
+#toast { position: absolute; top: 16px; right: 16px; background: rgba(74,158,255,0.9); color: #fff; padding: 8px 16px; border-radius: 6px; font-size: 12px; display: none; z-index: 10; }
+
+/* Help overlay */
+#help { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(0,0,0,0.85); color: #ddd; padding: 24px; border-radius: 10px; font-size: 13px; display: none; z-index: 20; min-width: 360px; }
+#help h2 { margin-bottom: 12px; color: #4a9eff; }
+#help table { width: 100%; }
+#help td { padding: 3px 8px; }
+#help td:first-child { color: #4a9eff; font-weight: bold; white-space: nowrap; }
+</style>
+</head>
+<body>
+
+<div id="sidebar">
+  <div class="section">
+    <h3>Rendering</h3>
+    <div class="row">
+      <label>Point Size</label>
+      <input type="range" id="point-size" min="0.5" max="10" step="0.5" value="2.0">
+      <span class="val" id="point-size-val">2.0</span>
+    </div>
+    <div class="row">
+      <label>Background</label>
+      <input type="color" id="bg-color" value="#000000">
+    </div>
+    <div class="row">
+      <label>Confidence</label>
+      <input type="range" id="conf-thresh" min="0" max="10" step="0.1" value="0">
+      <span class="val" id="conf-thresh-val">0.0</span>
+    </div>
+  </div>
+
+  <div class="section">
+    <h3>Post-Processing</h3>
+    <div class="row">
+      <label>EDL</label>
+      <input type="checkbox" id="edl-toggle" checked>
+    </div>
+    <div class="row">
+      <label>EDL Strength</label>
+      <input type="range" id="edl-strength" min="0.1" max="1.0" step="0.05" value="0.4">
+      <span class="val" id="edl-strength-val">0.4</span>
+    </div>
+    <div class="row">
+      <label>Camera Trail</label>
+      <input type="checkbox" id="trail-toggle" checked>
+    </div>
+  </div>
+
+  <div class="section">
+    <h3>Display Mode</h3>
+    <div class="radio-group">
+      <label><input type="radio" name="display-mode" value="all" checked> All</label>
+      <label><input type="radio" name="display-mode" value="cumulative"> Cumul.</label>
+      <label><input type="radio" name="display-mode" value="single"> Single</label>
+    </div>
+  </div>
+
+  <div class="section">
+    <h3>Screenshot</h3>
+    <div class="row">
+      <label>Resolution</label>
+      <select id="screenshot-res">
+        <option value="1920x1080">1920x1080</option>
+        <option value="2560x1440">2560x1440</option>
+        <option value="3840x2160">3840x2160</option>
+      </select>
+    </div>
+    <button class="btn" id="btn-screenshot">Screenshot (Ctrl+S)</button>
+  </div>
+
+  <div class="section">
+    <h3>Keyframes (<span id="kf-count">0</span>)</h3>
+    <button class="btn" id="btn-add-kf">Add Keyframe (K)</button>
+    <button class="btn danger" id="btn-del-kf">Delete Last (Del)</button>
+    <button class="btn secondary" id="btn-clear-kf">Clear All</button>
+    <div id="kf-list"></div>
+  </div>
+
+  <div class="section">
+    <h3>Video</h3>
+    <div class="row">
+      <label>FPS</label>
+      <input type="range" id="video-fps" min="15" max="60" step="5" value="30">
+      <span class="val" id="video-fps-val">30</span>
+    </div>
+    <div class="row">
+      <label>Steps/Seg</label>
+      <input type="range" id="video-steps" min="20" max="120" step="10" value="60">
+      <span class="val" id="video-steps-val">60</span>
+    </div>
+    <button class="btn" id="btn-render-video">Render Video (R)</button>
+  </div>
+
+  <div class="section">
+    <h3>Help</h3>
+    <button class="btn secondary" id="btn-help">Shortcuts (H)</button>
+  </div>
+</div>
+
+<div id="canvas-wrap">
+  <canvas id="render-canvas" width="1280" height="720"></canvas>
+  <div id="frame-bar">
+    <span>Frame</span>
+    <input type="range" id="frame-slider" min="0" max="0" value="0">
+    <span id="frame-val">0/0</span>
+  </div>
+  <div id="status">Loading...</div>
+  <div id="toast"></div>
+  <div id="help">
+    <h2>Keyboard Shortcuts</h2>
+    <table>
+      <tr><td>Left Drag</td><td>Orbit rotate</td></tr>
+      <tr><td>Right Drag</td><td>Pan</td></tr>
+      <tr><td>Scroll</td><td>Zoom</td></tr>
+      <tr><td>W/A/S/D</td><td>Move forward/left/back/right</td></tr>
+      <tr><td>Q/E</td><td>Move up/down</td></tr>
+      <tr><td>Shift</td><td>Hold for faster movement</td></tr>
+      <tr><td>K</td><td>Add keyframe</td></tr>
+      <tr><td>Delete</td><td>Remove last keyframe</td></tr>
+      <tr><td>Ctrl+S</td><td>Screenshot</td></tr>
+      <tr><td>R</td><td>Render video from keyframes</td></tr>
+      <tr><td>Space</td><td>Play/pause frame animation</td></tr>
+      <tr><td>H</td><td>Toggle this help</td></tr>
+    </table>
+  </div>
+</div>
+
+<script>
+const canvas = document.getElementById('render-canvas');
+const ctx = canvas.getContext('2d');
+const status = document.getElementById('status');
+const toast = document.getElementById('toast');
+const help = document.getElementById('help');
+const frameSlider = document.getElementById('frame-slider');
+const frameVal = document.getElementById('frame-val');
+
+let ws = null;
+let numFrames = 0;
+let playing = false;
+let playTimer = null;
+
+// ----- WebSocket -----
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws`);
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen = () => {
+    status.textContent = 'Connected';
+    fetchMeta();
+  };
+
+  ws.onmessage = (e) => {
+    if (e.data instanceof ArrayBuffer) {
+      // JPEG frame
+      const blob = new Blob([e.data], {type: 'image/jpeg'});
+      createImageBitmap(blob).then(bmp => {
+        canvas.width = bmp.width;
+        canvas.height = bmp.height;
+        ctx.drawImage(bmp, 0, 0);
+      });
+    } else {
+      const msg = JSON.parse(e.data);
+      if (msg.type === 'keyframes_updated') {
+        updateKeyframeList(msg.keyframes, msg.count);
+      } else if (msg.type === 'screenshot_done') {
+        showToast(`Screenshot saved: ${msg.path}`);
+      } else if (msg.type === 'video_done') {
+        showToast(`Video saved: ${msg.path} (${msg.frames} frames)`);
+      } else if (msg.type === 'video_progress') {
+        status.textContent = msg.message;
+      } else if (msg.type === 'error') {
+        showToast(msg.message, true);
+      }
+    }
+  };
+
+  ws.onclose = () => {
+    status.textContent = 'Disconnected. Reconnecting...';
+    setTimeout(connect, 2000);
+  };
+}
+
+function send(obj) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(obj));
+  }
+}
+
+async function fetchMeta() {
+  const res = await fetch('/meta');
+  const meta = await res.json();
+  numFrames = meta.num_frames;
+  frameSlider.max = Math.max(0, numFrames - 1);
+  frameVal.textContent = `0/${numFrames}`;
+  status.textContent = `${numFrames} frames, ${meta.total_points.toLocaleString()} points`;
+}
+
+// ----- Toast -----
+function showToast(msg, isError) {
+  toast.textContent = msg;
+  toast.style.background = isError ? 'rgba(224,85,85,0.9)' : 'rgba(74,158,255,0.9)';
+  toast.style.display = 'block';
+  setTimeout(() => { toast.style.display = 'none'; }, 3000);
+}
+
+// ----- Mouse interaction -----
+let isDragging = false;
+let dragButton = 0;
+let lastX = 0, lastY = 0;
+
+canvas.addEventListener('mousedown', (e) => {
+  isDragging = true;
+  dragButton = e.button;
+  lastX = e.clientX;
+  lastY = e.clientY;
+  canvas.classList.add('dragging');
+  e.preventDefault();
+});
+
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+
+window.addEventListener('mousemove', (e) => {
+  if (!isDragging) return;
+  const dx = e.clientX - lastX;
+  const dy = e.clientY - lastY;
+  lastX = e.clientX;
+  lastY = e.clientY;
+
+  if (dragButton === 0) {
+    send({type: 'orbit', dx, dy});
+  } else if (dragButton === 2) {
+    send({type: 'pan', dx, dy});
+  }
+});
+
+window.addEventListener('mouseup', () => {
+  isDragging = false;
+  canvas.classList.remove('dragging');
+});
+
+canvas.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  const delta = e.deltaY > 0 ? -1 : 1;
+  send({type: 'zoom', delta});
+}, {passive: false});
+
+// ----- Keyboard -----
+const keysDown = new Set();
+
+window.addEventListener('keydown', (e) => {
+  if (e.repeat) return;
+
+  // Ctrl+S screenshot
+  if (e.key === 's' && (e.ctrlKey || e.metaKey)) {
+    e.preventDefault();
+    doScreenshot();
+    return;
+  }
+
+  const key = e.key.toLowerCase();
+  keysDown.add(key);
+
+  if (key === 'k') {
+    send({type: 'add_keyframe'});
+  } else if (key === 'delete' || key === 'backspace') {
+    send({type: 'remove_keyframe'});
+  } else if (key === 'r' && !e.ctrlKey) {
+    doRenderVideo();
+  } else if (key === 'h') {
+    help.style.display = help.style.display === 'none' ? 'block' : 'none';
+  } else if (key === ' ') {
+    e.preventDefault();
+    togglePlay();
+  }
+
+  // Start WASD movement
+  if ('wasdeq'.includes(key)) {
+    startMovement();
+  }
+});
+
+window.addEventListener('keyup', (e) => {
+  keysDown.delete(e.key.toLowerCase());
+});
+
+let moveInterval = null;
+function startMovement() {
+  if (moveInterval) return;
+  moveInterval = setInterval(() => {
+    const shift = keysDown.has('shift');
+    if (keysDown.has('w')) send({type: 'move', dir: 'forward', shift});
+    if (keysDown.has('s')) send({type: 'move', dir: 'backward', shift});
+    if (keysDown.has('a')) send({type: 'move', dir: 'left', shift});
+    if (keysDown.has('d')) send({type: 'move', dir: 'right', shift});
+    if (keysDown.has('q')) send({type: 'move', dir: 'up', shift});
+    if (keysDown.has('e')) send({type: 'move', dir: 'down', shift});
+
+    // Stop if no movement keys held
+    if (!['w','a','s','d','q','e'].some(k => keysDown.has(k))) {
+      clearInterval(moveInterval);
+      moveInterval = null;
+    }
+  }, 33); // ~30fps
+}
+
+// ----- Frame playback -----
+function togglePlay() {
+  playing = !playing;
+  if (playing) {
+    playTimer = setInterval(() => {
+      let f = parseInt(frameSlider.value) + 1;
+      if (f >= numFrames) f = 0;
+      frameSlider.value = f;
+      frameVal.textContent = `${f}/${numFrames}`;
+      send({type: 'set_frame', value: f});
+    }, 100);
+  } else {
+    clearInterval(playTimer);
+  }
+}
+
+// ----- Controls -----
+document.getElementById('point-size').addEventListener('input', function() {
+  document.getElementById('point-size-val').textContent = this.value;
+  send({type: 'set_point_size', value: parseFloat(this.value)});
+});
+
+document.getElementById('bg-color').addEventListener('input', function() {
+  send({type: 'set_background', value: this.value});
+});
+
+document.getElementById('conf-thresh').addEventListener('input', function() {
+  document.getElementById('conf-thresh-val').textContent = parseFloat(this.value).toFixed(1);
+  send({type: 'set_conf_threshold', value: parseFloat(this.value)});
+});
+
+document.getElementById('edl-toggle').addEventListener('change', function() {
+  send({type: 'set_edl', enabled: this.checked});
+});
+document.getElementById('edl-strength').addEventListener('input', function() {
+  document.getElementById('edl-strength-val').textContent = parseFloat(this.value).toFixed(2);
+  send({type: 'set_edl_strength', value: parseFloat(this.value)});
+});
+document.getElementById('trail-toggle').addEventListener('change', function() {
+  send({type: 'set_trail', enabled: this.checked});
+});
+
+frameSlider.addEventListener('input', function() {
+  frameVal.textContent = `${this.value}/${numFrames}`;
+  send({type: 'set_frame', value: parseInt(this.value)});
+});
+
+document.querySelectorAll('input[name="display-mode"]').forEach(r => {
+  r.addEventListener('change', function() {
+    send({type: 'set_display_mode', value: this.value});
+  });
+});
+
+document.getElementById('video-fps').addEventListener('input', function() {
+  document.getElementById('video-fps-val').textContent = this.value;
+});
+document.getElementById('video-steps').addEventListener('input', function() {
+  document.getElementById('video-steps-val').textContent = this.value;
+});
+
+// ----- Buttons -----
+document.getElementById('btn-screenshot').addEventListener('click', doScreenshot);
+document.getElementById('btn-add-kf').addEventListener('click', () => send({type: 'add_keyframe'}));
+document.getElementById('btn-del-kf').addEventListener('click', () => send({type: 'remove_keyframe'}));
+document.getElementById('btn-clear-kf').addEventListener('click', () => send({type: 'clear_keyframes'}));
+document.getElementById('btn-render-video').addEventListener('click', doRenderVideo);
+document.getElementById('btn-help').addEventListener('click', () => {
+  help.style.display = help.style.display === 'none' ? 'block' : 'none';
+});
+
+function doScreenshot() {
+  const res = document.getElementById('screenshot-res').value;
+  send({type: 'screenshot', resolution: res});
+}
+
+function doRenderVideo() {
+  const fps = parseInt(document.getElementById('video-fps').value);
+  const steps = parseInt(document.getElementById('video-steps').value);
+  send({type: 'render_video', fps, steps_per_segment: steps});
+}
+
+// ----- Keyframe list -----
+function updateKeyframeList(keyframes, count) {
+  document.getElementById('kf-count').textContent = count;
+  const list = document.getElementById('kf-list');
+  list.innerHTML = '';
+  keyframes.forEach((kf, i) => {
+    const div = document.createElement('div');
+    div.className = 'kf-item';
+    div.innerHTML = `<span>KF ${i+1}</span><span>Frame ${kf.frame_idx}</span>`;
+    div.addEventListener('click', () => send({type: 'goto_keyframe', index: i}));
+    list.appendChild(div);
+  });
+}
+
+// ----- Init -----
+connect();
+</script>
+</body>
+</html>

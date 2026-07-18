@@ -10,8 +10,7 @@ dependencies = [
     "safetensors",
     "opencv-python",
     "tqdm",
-    "scipy",
-    "torchvision",
+    "scipy"
 ]
 
 [project.optional-dependencies]

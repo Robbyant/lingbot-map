@@ -1,0 +1,26 @@
+# 7Scenes — lingbot_map trajectory + AUC + point-cloud evaluation.
+# Stride-5 sampling; see configs/datasets/seven_scenes.yaml.
+workspace: /path/to/workspace/seven_scenes
+
+datasets:
+  - seven_scenes
+
+methods:
+  - lingbot_map
+  - lingbot_map_v1
+
+evaluation:
+  traj:
+    enable: true
+    vis: true
+  auc:
+    enable: true
+    vis: true
+    aggregation: both
+  depth:
+    enable: false
+  points:
+    enable: true
+    vis: false
+    icp_threshold: 0.1
+    conf_threshold: 0.0

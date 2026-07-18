@@ -300,6 +300,27 @@ class FlashInferKVCacheManager:
         # 3) Decrement frame count
         self.frame_count[block_idx] -= 1
 
+    def get_cache_stats(self, block_idx: int = 0) -> dict:
+        """Read-only snapshot of cache occupancy for one block.
+
+        Useful for debugging keyframe / sliding-window behavior.
+
+        Returns:
+            dict with keys:
+              - ``frame_count``   total frames ever appended (minus rollbacks)
+              - ``scale_pages``   scale-region patch pages currently held
+              - ``live_pages``    sliding-window patch pages currently held
+              - ``free_pages``    patch pages on the free list
+              - ``special_tokens`` running count of special tokens written
+        """
+        return {
+            "frame_count":    int(self.frame_count[block_idx]),
+            "scale_pages":    len(self.scale_patch_pages[block_idx]),
+            "live_pages":     len(self.live_window_patch_pages[block_idx]),
+            "free_pages":     len(self.free_patch_pages[block_idx]),
+            "special_tokens": int(self.special_token_count[block_idx]),
+        }
+
     def _gather_kv(self, block_idx: int):
         """
         Gather all visible K and V tokens from the paged cache into dense tensors.

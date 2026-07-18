@@ -29,24 +29,6 @@ except ImportError:
     FLASHINFER_AVAILABLE = False
     print("flashinfer not available")
 
-try:
-    from torchtitan.distributed.sequence_parallel import (
-        gather_seq_scatter_heads,
-        gather_heads_scatter_seq,
-        pad_tensor,
-        slice_input_tensor_scale_grad,
-        gather_outputs,
-    )
-except ImportError:
-    print("torchtitan not available for ulysses cp")
-
-def gather_seq_scatter_heads_qkv(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, seq_dim: int, head_dim: int):
-    """Gather sequence dimension and scatter head dimension for Q, K, V tensors."""
-    q = gather_seq_scatter_heads(q, seq_dim, head_dim)
-    k = gather_seq_scatter_heads(k, seq_dim, head_dim)
-    v = gather_seq_scatter_heads(v, seq_dim, head_dim)
-    return q, k, v
-
 from typing_extensions import List
 from typing import Optional, Tuple
 
@@ -80,14 +62,11 @@ class Attention(nn.Module):
         self.proj_drop = nn.Dropout(proj_drop)
         self.rope = rope
 
-    def forward(self, x: Tensor, pos=None, enable_ulysses_cp=False, num_patches=None, num_special=None, num_frames=None, enable_3d_rope=False) -> Tensor:
+    def forward(self, x: Tensor, pos=None, num_patches=None, num_special=None, num_frames=None, enable_3d_rope=False) -> Tensor:
         B, N, C = x.shape
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)
         q, k = self.q_norm(q), self.k_norm(k)
-
-        if enable_ulysses_cp:
-            q, k, v = gather_seq_scatter_heads_qkv(q, k, v, seq_dim=2, head_dim=1)
 
         if self.rope is not None:
             q = self.rope(q, pos)
@@ -101,9 +80,6 @@ class Attention(nn.Module):
             attn = attn.softmax(dim=-1)
             attn = self.attn_drop(attn)
             x = attn @ v
-
-        if enable_ulysses_cp:
-            x = gather_heads_scatter_seq(x, seq_dim=2, head_dim=1)
 
         x = x.transpose(1, 2).reshape(B, -1, self.num_heads * self.head_dim)
         x = self.proj(x)
@@ -160,7 +136,7 @@ class CausalAttention(nn.Module):
         self.kv_cache_include_scale_frames = kv_cache_include_scale_frames
         self.kv_cache_camera_only = kv_cache_camera_only
 
-    def forward(self, x: Tensor, block_mask=None, pos=None, pos_kv=None, frame_seqlen=None, video_mask=None, kv_cache=None, current_start=0, current_end=0, global_idx=0, num_frame_per_block=1, num_frame_for_scale=-1, enable_3d_rope=False, sliding_window_size=-1, attend_to_scale_frames=False, num_random_frames=0, attend_to_special_tokens=False, num_register_tokens=4, enable_ulysses_cp=False, is_scale_frames=False) -> Tensor:
+    def forward(self, x: Tensor, block_mask=None, pos=None, pos_kv=None, frame_seqlen=None, video_mask=None, kv_cache=None, current_start=0, current_end=0, global_idx=0, num_frame_per_block=1, num_frame_for_scale=-1, enable_3d_rope=False, sliding_window_size=-1, attend_to_scale_frames=False, num_random_frames=0, attend_to_special_tokens=False, num_register_tokens=4, is_scale_frames=False) -> Tensor:
         B, N, C = x.shape
 
         # Calculate special token indices
@@ -175,9 +151,6 @@ class CausalAttention(nn.Module):
             gate_score = self.gate_proj(x).reshape(B, N, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
         if kv_cache is None:
             q, k = self.q_norm(q), self.k_norm(k)
-            if enable_ulysses_cp:
-                q, k, v = gather_seq_scatter_heads_qkv(q, k, v, seq_dim=2, head_dim=1)
-                N = q.shape[2]  # Update N after gather
             if self.rope is not None and not enable_3d_rope:
                 q = self.rope(q, pos)
                 k = self.rope(k, pos)
@@ -314,8 +287,6 @@ class CausalAttention(nn.Module):
 
         if self.gate_proj is not None:
             x = x * torch.sigmoid(gate_score)
-        if enable_ulysses_cp:
-            x = gather_heads_scatter_seq(x, seq_dim=2, head_dim=1)
         # Use actual dimensions from attention output, not original input C
         # x shape: [B, H, seq_len, head_dim] -> [B, seq_len, H*head_dim]
         x = x.transpose(1, 2).reshape(B, -1, self.num_heads * self.head_dim)
@@ -454,7 +425,7 @@ class FlashInferAttention(Attention):
         v_nhd = v.squeeze(0).permute(1, 0, 2).contiguous()
         return q_nhd, k_nhd, v_nhd
 
-    def forward(self, x: Tensor, pos=None, enable_ulysses_cp=False,
+    def forward(self, x: Tensor, pos=None,
                 num_patches=None, num_special=None, num_frames=None, enable_3d_rope=False,
                 # KV cache parameters (kv_cache is a FlashInferKVCacheManager or None)
                 kv_cache=None, global_idx=0, num_frame_per_block=1,
@@ -471,33 +442,12 @@ class FlashInferAttention(Attention):
 
         B, N, C = x.shape
 
-        # Detect if using optimized layout
-        using_optimized_layout = (num_patches is not None and num_special is not None
-                                 and num_frames is not None)
-
         # ========== Batch Mode (no KV cache manager) ==========
         if not isinstance(kv_cache, FlashInferKVCacheManager):
             # [3, B, num_heads, N, head_dim]
             qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
             q, k, v = qkv.unbind(0)  # Each: [B, num_heads, N, head_dim]
             q, k = self.q_norm(q), self.k_norm(k)
-
-            if enable_ulysses_cp:
-                if using_optimized_layout:
-                    boundary = num_frames * num_patches
-                    q_patch, k_patch, v_patch = q[:, :, :boundary, :], k[:, :, :boundary, :], v[:, :, :boundary, :]
-                    q_special, k_special, v_special = q[:, :, boundary:, :], k[:, :, boundary:, :], v[:, :, boundary:, :]
-                    q_patch, k_patch, v_patch = gather_seq_scatter_heads_qkv(
-                        q_patch, k_patch, v_patch, seq_dim=2, head_dim=1
-                    )
-                    q_special, k_special, v_special = gather_seq_scatter_heads_qkv(
-                        q_special, k_special, v_special, seq_dim=2, head_dim=1
-                    )
-                    q = torch.cat([q_patch, q_special], dim=2)
-                    k = torch.cat([k_patch, k_special], dim=2)
-                    v = torch.cat([v_patch, v_special], dim=2)
-                else:
-                    q, k, v = gather_seq_scatter_heads_qkv(q, k, v, seq_dim=2, head_dim=1)
 
             if self.rope is not None and not enable_3d_rope:
                 q = self.rope(q, pos)
@@ -511,20 +461,6 @@ class FlashInferAttention(Attention):
                 q, k, v,
                 dropout_p=self.attn_drop.p if self.training else 0.0,
             )
-
-            if enable_ulysses_cp:
-                if using_optimized_layout:
-                    seq_global = x.shape[2]
-                    seq_local = num_frames * (num_patches + num_special)
-                    cp_size = seq_global // seq_local
-                    boundary_global = num_frames * cp_size * num_patches
-                    x_patch = x[:, :, :boundary_global, :]
-                    x_special = x[:, :, boundary_global:, :]
-                    x_patch = gather_heads_scatter_seq(x_patch, seq_dim=2, head_dim=1)
-                    x_special = gather_heads_scatter_seq(x_special, seq_dim=2, head_dim=1)
-                    x = torch.cat([x_patch, x_special], dim=2)
-                else:
-                    x = gather_heads_scatter_seq(x, seq_dim=2, head_dim=1)
 
             x = x.transpose(1, 2).reshape(B, N, self.num_heads * self.head_dim)
 
@@ -577,22 +513,40 @@ class FlashInferAttention(Attention):
                 # Phase 2: single-frame streaming via FlashInfer paged attention.
                 q_nhd, k_nhd, v_nhd = self.prepare_qkv(x, pos=pos, enable_3d_rope=enable_3d_rope)
 
-                # 1. Append to paged cache
-                manager.append_frame(global_idx, k_nhd, v_nhd)
+                # Non-keyframe path: attend to cache+current but don't persist.
+                # FlashInfer paged attention can only read from the cache, so we
+                # temporarily append (with eviction deferred so it stays clean),
+                # attend, and then roll back the append.  Mirrors the
+                # ``skip_append`` behavior of the SDPA path.
+                skip_append = getattr(manager, '_skip_append', False)
+                if skip_append:
+                    # Defensive fallback: the hot path for FlashInfer streaming
+                    # is `FlashInferBlock.forward` which inlines this logic.
+                    # Kept here for any caller that invokes
+                    # ``FlashInferAttention.forward`` with a single frame.
+                    prev_defer = manager._defer_eviction
+                    manager._defer_eviction = True
+                    manager.append_frame(global_idx, k_nhd, v_nhd)
+                    x = manager.compute_attention(global_idx, q_nhd)
+                    manager.rollback_last_frame(global_idx)
+                    manager._defer_eviction = prev_defer
+                else:
+                    # 1. Append to paged cache
+                    manager.append_frame(global_idx, k_nhd, v_nhd)
 
-                # 2. Apply sliding window eviction
-                manager.evict_frames(
-                    block_idx=global_idx,
-                    scale_frames=self.kv_cache_scale_frames,
-                    sliding_window=self.kv_cache_sliding_window,
-                    cross_frame_special=self.kv_cache_cross_frame_special,
-                    include_scale_frames=self.kv_cache_include_scale_frames,
-                    camera_only=self.kv_cache_camera_only,
-                    num_register_tokens=num_register_tokens,
-                )
+                    # 2. Apply sliding window eviction
+                    manager.evict_frames(
+                        block_idx=global_idx,
+                        scale_frames=self.kv_cache_scale_frames,
+                        sliding_window=self.kv_cache_sliding_window,
+                        cross_frame_special=self.kv_cache_cross_frame_special,
+                        include_scale_frames=self.kv_cache_include_scale_frames,
+                        camera_only=self.kv_cache_camera_only,
+                        num_register_tokens=num_register_tokens,
+                    )
 
-                # 3. Compute attention via FlashInfer BatchPrefillWithPagedKVCacheWrapper
-                x = manager.compute_attention(global_idx, q_nhd)
+                    # 3. Compute attention via FlashInfer BatchPrefillWithPagedKVCacheWrapper
+                    x = manager.compute_attention(global_idx, q_nhd)
 
                 # Convert back: [tpf, H, D] -> [B, tpf, C].
                 x = x.reshape(B, q_nhd.shape[0], self.num_heads * self.head_dim)
@@ -638,13 +592,11 @@ class SDPAAttention(Attention):
         self.kv_cache_include_scale_frames = kv_cache_include_scale_frames
         self.kv_cache_camera_only = kv_cache_camera_only
 
-    def forward(self, x: Tensor, pos=None, enable_ulysses_cp=False,
+    def forward(self, x: Tensor, pos=None,
                 num_patches=None, num_special=None, num_frames=None, enable_3d_rope=False,
                 kv_cache=None, global_idx=0, num_frame_per_block=1,
                 num_frame_for_scale=-1, num_register_tokens=4) -> Tensor:
         B, N, C = x.shape
-        using_optimized_layout = (num_patches is not None and num_special is not None
-                                 and num_frames is not None)
 
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)
@@ -677,28 +629,39 @@ class SDPAAttention(Attention):
             camera_token_idx = 0
             scale_token_idx = camera_token_idx + num_register_tokens + 1
 
-            if kv_cache[f"k_{global_idx}"] is None:
-                kv_cache[f"k_{global_idx}"] = k.view(B, self.num_heads, num_frame_per_block,
-                                                     N // num_frame_per_block, self.head_dim)
-                kv_cache[f"v_{global_idx}"] = v.view(B, self.num_heads, num_frame_per_block,
-                                                     N // num_frame_per_block, self.head_dim)
-            else:
+            # Check if we should skip appending to cache (non-keyframe in keyframe mode)
+            skip_append = kv_cache.get("_skip_append", False)
+
+            if kv_cache[f"k_{global_idx}"] is not None:
                 num_frame_per_block = k.shape[2] // kv_cache[f"k_{global_idx}"].shape[3]
-                kv_cache[f"k_{global_idx}"] = torch.cat((
-                    kv_cache[f"k_{global_idx}"],
-                    k.view(B, self.num_heads, num_frame_per_block, N // num_frame_per_block, self.head_dim)
-                ), dim=2)
-                kv_cache[f"v_{global_idx}"] = torch.cat((
-                    kv_cache[f"v_{global_idx}"],
-                    v.view(B, self.num_heads, num_frame_per_block, N // num_frame_per_block, self.head_dim)
-                ), dim=2)
+            k_reshaped = k.view(B, self.num_heads, num_frame_per_block,
+                                N // num_frame_per_block, self.head_dim)
+            v_reshaped = v.view(B, self.num_heads, num_frame_per_block,
+                                N // num_frame_per_block, self.head_dim)
 
-            self._apply_kv_cache_eviction(
-                kv_cache, global_idx, camera_token_idx, scale_token_idx, num_register_tokens
-            )
+            if not skip_append:
+                # KEYFRAME: store in cache (original behavior)
+                if kv_cache[f"k_{global_idx}"] is None:
+                    kv_cache[f"k_{global_idx}"] = k_reshaped
+                    kv_cache[f"v_{global_idx}"] = v_reshaped
+                else:
+                    kv_cache[f"k_{global_idx}"] = torch.cat((kv_cache[f"k_{global_idx}"], k_reshaped), dim=2)
+                    kv_cache[f"v_{global_idx}"] = torch.cat((kv_cache[f"v_{global_idx}"], v_reshaped), dim=2)
 
-            k_cached = kv_cache[f"k_{global_idx}"].clone()
-            v_cached = kv_cache[f"v_{global_idx}"].clone()
+                self._apply_kv_cache_eviction(
+                    kv_cache, global_idx, camera_token_idx, scale_token_idx, num_register_tokens
+                )
+
+                k_cached = kv_cache[f"k_{global_idx}"].clone()
+                v_cached = kv_cache[f"v_{global_idx}"].clone()
+            else:
+                # NON-KEYFRAME: attend to [cached + current] without storing in cache
+                if kv_cache[f"k_{global_idx}"] is not None:
+                    k_cached = torch.cat((kv_cache[f"k_{global_idx}"], k_reshaped), dim=2)
+                    v_cached = torch.cat((kv_cache[f"v_{global_idx}"], v_reshaped), dim=2)
+                else:
+                    k_cached = k_reshaped
+                    v_cached = v_reshaped
             a, b, c, d, e = k_cached.shape
             k_full = k_cached.reshape(a, b, c * d, e)
             v_full = v_cached.reshape(a, b, c * d, e)

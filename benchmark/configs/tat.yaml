@@ -1,0 +1,22 @@
+# Tanks and Temples (TaT) — lingbot_map trajectory + AUC evaluation.
+# Uses COLMAP SfM camera poses as GT; see configs/datasets/tat.yaml.
+workspace: /path/to/workspace/tat
+
+datasets:
+  - tat
+
+methods:
+  - lingbot_map
+
+evaluation:
+  traj:
+    enable: true
+    vis: true
+  auc:
+    enable: true
+    vis: true
+    aggregation: both
+  depth:
+    enable: false
+  points:
+    enable: false

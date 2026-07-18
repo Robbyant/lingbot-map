@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Benchmark Static Report</title>
+    <link rel="stylesheet" href="assets/styles.css">
+</head>
+<body>
+    <header class="site-header">
+        <div>
+            <h1>Benchmark Static Report</h1>
+            <p>Read-only viewer for evaluated benchmark outputs.</p>
+        </div>
+        <div id="status" class="status">Loading manifest...</div>
+    </header>
+
+    <main>
+        <section class="panel controls-panel">
+            <div class="control-group">
+                <label for="dataset-selector">Dataset</label>
+                <select id="dataset-selector"></select>
+            </div>
+        </section>
+
+        <section class="panel primary-panel">
+            <div class="section-header">
+                <div>
+                    <h2>Dataset Overview</h2>
+                    <p>Dataset-level averages across all scenes. Use the section method filter and each table's metric filter to adjust the view.</p>
+                </div>
+            </div>
+            <div id="dataset-overview"></div>
+        </section>
+
+        <section class="panel">
+            <div class="section-header">
+                <div>
+                    <h2>Scene Breakdown</h2>
+                    <p>Scene-level cross-method metrics for diagnosing per-scene behavior.</p>
+                </div>
+            </div>
+            <div class="control-group inline-control section-control">
+                <label for="scene-breakdown-selector">Scene</label>
+                <select id="scene-breakdown-selector"></select>
+            </div>
+            <div id="scene-summary"></div>
+        </section>
+
+        <section class="panel">
+            <div class="section-header">
+                <div>
+                    <h2>Artifacts</h2>
+                    <p>Visualizations and raw JSON for a selected scene and method.</p>
+                </div>
+            </div>
+            <div class="artifact-controls">
+                <div class="control-group inline-control">
+                    <label for="artifact-scene-selector">Scene</label>
+                    <select id="artifact-scene-selector"></select>
+                </div>
+                <div class="control-group inline-control">
+                    <label for="artifact-method-selector">Method</label>
+                    <select id="artifact-method-selector"></select>
+                </div>
+            </div>
+            <div id="artifact-details"></div>
+        </section>
+    </main>
+
+    <footer>
+        <a href="README.md" target="_blank" rel="noreferrer">README</a>
+    </footer>
+
+    <script src="assets/app.js"></script>
+</body>
+</html>
