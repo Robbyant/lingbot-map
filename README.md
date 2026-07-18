@@ -309,7 +309,8 @@ python demo.py --model_path /path/to/checkpoint.pt \
 
 On Apple Silicon Macs, `--device auto` uses MPS when CUDA is unavailable.
 FlashInfer is CUDA-only, so the demo automatically switches to PyTorch SDPA
-when running on MPS or CPU.
+when running on MPS or CPU. MPS inference uses bfloat16 autocast for the model
+trunk while keeping the camera, depth, and point heads in float32.
 
 ```bash
 python demo.py --model_path /path/to/checkpoint.pt \

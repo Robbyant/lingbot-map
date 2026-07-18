@@ -362,10 +362,11 @@ class WanRotaryPosEmbed(nn.Module):
         """
 
         # 步骤1：将预计算的频率移到目标设备，并分割成三个维度
-        if device.type == "mps":
-            freqs_tensor = self.freqs.to(dtype=torch.complex64).to(device)
-        else:
-            freqs_tensor = self.freqs.to(device)
+        # MPS has no float64/complex128 — downcast the precomputed freqs to
+        # complex64 before moving them (precompute itself stays fp64 on CPU).
+        if device.type == "mps" and self.freqs.dtype == torch.complex128:
+            self.freqs = self.freqs.to(torch.complex64)
+        self.freqs = self.freqs.to(device)
         # 获取实际的维度分配
         if hasattr(self, 'fhw_dim') and self.fhw_dim is not None:
             t_dim, h_dim, w_dim = self.fhw_dim
@@ -375,7 +376,7 @@ class WanRotaryPosEmbed(nn.Module):
             t_dim = self.attention_head_dim - h_dim - w_dim
         
         # 使用正确的split sizes（每个维度的一半）
-        freqs = freqs_tensor.split_with_sizes(
+        freqs = self.freqs.split_with_sizes(
             [
                 t_dim // 2,  # 时间维度
                 h_dim // 2,  # 高度维度

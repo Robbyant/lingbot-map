@@ -25,7 +25,6 @@ import platform
 import sys
 import tempfile
 import time
-from contextlib import nullcontext
 
 # Must be set before `import torch` / any CUDA init. Reduces the reserved-vs-allocated
 # memory gap by letting the caching allocator grow segments on demand instead of
@@ -482,6 +481,8 @@ def main():
     # Pick inference dtype; autocast still runs for the ops that need fp32 (e.g. LayerNorm).
     if device.type == "cuda":
         dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
+    elif device.type == "mps":
+        dtype = torch.bfloat16
     else:
         dtype = torch.float32
 
@@ -576,10 +577,10 @@ def main():
     t0 = time.time()
 
     output_device = torch.device("cpu") if args.offload_to_cpu else None
-    autocast_context = (
-        torch.amp.autocast("cuda", dtype=dtype)
-        if device.type == "cuda"
-        else nullcontext()
+    autocast_context = torch.amp.autocast(
+        device.type,
+        dtype=dtype,
+        enabled=dtype != torch.float32,
     )
 
     with torch.no_grad(), autocast_context:
