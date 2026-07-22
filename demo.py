@@ -2,19 +2,19 @@
 
 Usage:
     # Streaming inference (frame-by-frame with KV cache)
-    python examples/demo.py --model_path /path/to/checkpoint.pt \
+    python demo.py --model_path /path/to/checkpoint.pt \
         --image_folder /path/to/images/
 
     # Streaming inference with keyframe KV caching
-    python examples/demo.py --model_path /path/to/checkpoint.pt \
+    python demo.py --model_path /path/to/checkpoint.pt \
         --image_folder /path/to/images/ --mode streaming --keyframe_interval 6
 
     # Windowed inference (for very long sequences, >500 frames)
-    python examples/demo.py --model_path /path/to/checkpoint.pt \
+    python demo.py --model_path /path/to/checkpoint.pt \
         --video_path video.mp4 --fps 10 --mode windowed --window_size 64
 
     # From video with custom FPS sampling
-    python examples/demo.py --model_path /path/to/checkpoint.pt \
+    python demo.py --model_path /path/to/checkpoint.pt \
         --video_path video.mp4 --fps 10
 """
 
