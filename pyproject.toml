@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "LingBot-Map: Geometric Context Transformer for Streaming 3D Reconstruction"
 requires-python = ">= 3.10"
 dependencies = [
+    "numpy<2",
     "Pillow",
     "huggingface_hub",
     "einops",
@@ -15,6 +16,7 @@ dependencies = [
 
 [project.optional-dependencies]
 vis = ["viser>=0.2.23", "trimesh", "matplotlib", "onnxruntime", "requests"]
+render = ["open3d>=0.19", "pyyaml"]
 demo = ["lingbot-map[vis]"]
 
 [build-system]
