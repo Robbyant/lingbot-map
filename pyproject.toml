@@ -2,19 +2,24 @@
 name = "lingbot-map"
 version = "0.1.0"
 description = "LingBot-Map: Geometric Context Transformer for Streaming 3D Reconstruction"
-requires-python = ">= 3.10"
+requires-python = "~=3.12.0"
 dependencies = [
+    "torch>=2.12.1",
+    "torchvision>=0.27.1",
+    "flashinfer-python",
     "Pillow",
     "huggingface_hub",
     "einops",
     "safetensors",
     "opencv-python",
     "tqdm",
-    "scipy"
+    "scipy",
+    "pip>=26.1.2",
+    "flashinfer-cubin>=0.6.13",
 ]
 
 [project.optional-dependencies]
-vis = ["viser>=0.2.23", "trimesh", "matplotlib", "onnxruntime", "requests"]
+vis = ["viser>=0.2.23", "trimesh", "matplotlib", "onnxruntime-gpu", "requests"]
 demo = ["lingbot-map[vis]"]
 
 [build-system]

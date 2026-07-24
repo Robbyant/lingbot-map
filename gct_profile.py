@@ -169,11 +169,11 @@ def summarize(per_frame_ms, scale_frames, phase1_ms, label):
     ms_lo, ms_mid, ms_hi = avg_ms(p_lo), avg_ms(p_mid), avg_ms(p_hi)
 
     print(f"\n  [{label}]  ({total_frames} total frames: {scale_frames} scale + {n} streaming)")
-    print(f"    ── Global FPS ─────────────────────────────────────")
+    print("    ── Global FPS ─────────────────────────────────────")
     print(f"      total time: {total_ms / 1000:.2f} s  "
           f"({phase1_ms:.1f} ms phase1 + {total_ms - phase1_ms:.1f} ms phase2)")
     print(f"      per frame : {global_ms_per_frame:6.2f} ms  →  {global_fps:6.2f} FPS")
-    print(f"    ── Windowed FPS (±30 streaming frames) ────────────")
+    print("    ── Windowed FPS (±30 streaming frames) ────────────")
     print(f"      frame {scale_frames + p_lo:>5d} (10%): {ms_lo:6.2f} ms  →  {fps(ms_lo):6.2f} FPS")
     print(f"      frame {scale_frames + p_mid:>5d} (50%): {ms_mid:6.2f} ms  →  {fps(ms_mid):6.2f} FPS")
     print(f"      frame {scale_frames + p_hi:>5d} (90%): {ms_hi:6.2f} ms  →  {fps(ms_hi):6.2f} FPS")
@@ -182,7 +182,7 @@ def summarize(per_frame_ms, scale_frames, phase1_ms, label):
     # original script. This naturally skips the cold first streaming frame
     # (global index = scale_frames), whose ms is dominated by one-time CUDA
     # graph (re)capture after `clean_kv_cache()` in profile_streaming.
-    print(f"    ── FPS trace (every 100 global frames) ────────────")
+    print("    ── FPS trace (every 100 global frames) ────────────")
     first_trace = (100 - scale_frames) % 100 or 100
     for i in range(first_trace, n, 100):
         ms_i = avg_ms(i, window=3)
@@ -344,12 +344,12 @@ def main():
             _warm(model)
 
             if args.compile:
-                print(f"  Compiling hot modules...")
+                print("  Compiling hot modules...")
                 compile_model(model)
                 # Three passes under compile: 1st captures CUDA graphs, 2nd/3rd
                 # replay so the caching allocator and graph-address map converge
                 # on the exact state the subsequent profile will see.
-                print(f"  Warmup compiled (3× dress rehearsal)...")
+                print("  Warmup compiled (3× dress rehearsal)...")
                 _warm(model, passes=3)
             else:
                 # No compile → a single dress-rehearsal pass is enough to

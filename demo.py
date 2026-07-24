@@ -24,6 +24,7 @@ import os
 import sys
 import tempfile
 import time
+from pathlib import Path
 
 # Must be set before `import torch` / any CUDA init. Reduces the reserved-vs-allocated
 # memory gap by letting the caching allocator grow segments on demand instead of
@@ -88,10 +89,11 @@ def load_images(image_folder=None, video_path=None, fps=10, image_ext=".jpg,.png
         resolved_folder = out_dir
         print(f"Extracted {len(paths)} frames from video ({total_frames} total, interval={interval})")
     else:
+        assert image_folder is not None
         exts = image_ext.split(",")
         paths = []
         for ext in exts:
-            paths.extend(glob.glob(os.path.join(image_folder, f"*{ext}")))
+            paths.extend(glob.glob(str(Path(image_folder) / f"*{ext}")))
         paths = sorted(paths)
         resolved_folder = image_folder
 
@@ -106,7 +108,7 @@ def load_images(image_folder=None, video_path=None, fps=10, image_ext=".jpg,.png
         # Image.ROTATE_270 = lossless 90° clockwise (270° counter-clockwise) reordering.
         for p in tqdm(paths, desc="Rotating images 90° CW"):
             out_path = os.path.join(rotated_dir, os.path.basename(p))
-            Image.open(p).transpose(Image.ROTATE_270).save(out_path)
+            Image.open(p).transpose(Image.Transpose.ROTATE_270).save(out_path)
             rotated_paths.append(out_path)
         paths = rotated_paths
         resolved_folder = rotated_dir
@@ -211,10 +213,15 @@ def _warm_streaming(model, images, scale_frames, warm_stream_n, dtype,
     warm_stream_n = max(1, min(int(warm_stream_n), num_avail - scale_frames))
     kf_int = max(int(keyframe_interval), 1)
 
-    # images: [S, 3, H, W] on device already; slice + add batch dim, no copy of
-    # spatial dims so warmup shape == real inference shape (H, W).
-    warm_scale = images[:scale_frames].unsqueeze(0).to(dtype)
-    warm_stream = images[scale_frames:scale_frames + warm_stream_n].unsqueeze(0).to(dtype)
+    # images may live on CPU; move only the warmup slices to the model device so
+    # long videos do not become persistent GPU residents before inference starts.
+    _model_device = next(model.parameters()).device
+    warm_scale = images[:scale_frames].unsqueeze(0).to(
+        device=_model_device, dtype=dtype, non_blocking=True
+    )
+    warm_stream = images[scale_frames:scale_frames + warm_stream_n].unsqueeze(0).to(
+        device=_model_device, dtype=dtype, non_blocking=True
+    )
 
     for _ in range(passes):
         model.clean_kv_cache()
@@ -387,7 +394,7 @@ def main():
     parser.add_argument(
         "--offload_to_cpu",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=True,
         help="Offload per-frame predictions to CPU during inference to cut GPU peak memory "
             "(on by default).  Use --no-offload_to_cpu to keep outputs on GPU.",
     )
@@ -459,14 +466,13 @@ def main():
         print(f"Casting aggregator to {dtype} (heads kept in fp32)")
         model.aggregator = model.aggregator.to(dtype=dtype)
 
-    images = images.to(device)
     num_frames = images.shape[0]
     print(f"Input: {num_frames} frames, shape {tuple(images.shape)}")
     print(f"Mode: {args.mode}")
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         print(
-            f"GPU mem after load: "
+            f"GPU mem after model load: "
             f"alloc={torch.cuda.memory_allocated()/1e9:.2f} GB, "
             f"reserved={torch.cuda.memory_reserved()/1e9:.2f} GB"
         )
@@ -497,6 +503,12 @@ def main():
                 f"each window covers up to {actual_per_window} actual frames "
                 f"(window_size={args.window_size} keyframes, scale={args.num_scale_frames})."
             )
+
+    if not args.offload_to_cpu and (args.mode == "windowed" or num_frames > 512):
+        print(
+            "Warning: --no-offload_to_cpu keeps the full prediction history on the GPU; "
+            "long sequences can OOM even when KV cache growth is bounded."
+        )
 
     # ── Optional: torch.compile + CUDA-graph warmup (streaming only) ────────
     if args.compile:

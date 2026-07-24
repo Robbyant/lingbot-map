@@ -17,3 +17,9 @@ weights/
 **/.DS_Store
 docs/
 
+uv.lock
+*.ply
+*.glb
+*.7z
+export_data.bin
+lingbot-map-long.pt
