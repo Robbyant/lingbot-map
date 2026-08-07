@@ -17,6 +17,7 @@ import cv2
 import matplotlib
 from scipy.spatial.transform import Rotation
 
+from lingbot_map.utils.geometry import unproject_depth_map_to_point_map
 from lingbot_map.vis.sky_segmentation import (
     _SKYSEG_INPUT_SIZE,
     _SKYSEG_SOFT_THRESHOLD,
@@ -30,6 +31,38 @@ try:
 except ImportError:
     trimesh = None
     print("trimesh not found. GLB export will not work.")
+
+
+def _world_points_from_depth(predictions: dict) -> np.ndarray:
+    """Unproject predicted depth maps into world-space points.
+
+    The released checkpoints are trained with the point head disabled
+    (``GCTStream`` defaults to ``enable_point=False``), so ``predictions`` has
+    no ``world_points`` key and the point cloud has to be built from depth plus
+    camera parameters. This mirrors what the interactive viewers already do,
+    so GLB exports and the viser preview show the same geometry.
+
+    Args:
+        predictions: Prediction dict containing ``depth`` (S, H, W, 1),
+            ``extrinsic`` (S, 3, 4) and ``intrinsic`` (S, 3, 3).
+
+    Returns:
+        np.ndarray: World points of shape (S, H, W, 3).
+
+    Raises:
+        KeyError: If any of the required keys is missing.
+    """
+    required = ("depth", "extrinsic", "intrinsic")
+    missing = [key for key in required if predictions.get(key) is None]
+    if missing:
+        raise KeyError(
+            "cannot build a point cloud from depth: predictions is missing "
+            f"{', '.join(missing)}. Available keys: {sorted(predictions)}"
+        )
+
+    return unproject_depth_map_to_point_map(
+        predictions["depth"], predictions["extrinsic"], predictions["intrinsic"]
+    )
 
 
 def predictions_to_glb(
@@ -48,10 +81,14 @@ def predictions_to_glb(
 
     Args:
         predictions: Dictionary containing model predictions with keys:
-            - world_points: 3D point coordinates (S, H, W, 3)
-            - world_points_conf: Confidence scores (S, H, W)
             - images: Input images (S, H, W, 3) or (S, 3, H, W)
             - extrinsic: Camera extrinsic matrices (S, 3, 4)
+            - intrinsic: Camera intrinsic matrices (S, 3, 3)
+            - world_points: 3D point coordinates (S, H, W, 3), optional
+            - world_points_conf: Confidence scores (S, H, W), optional
+            - depth: Depth maps (S, H, W, 1), used to build the point cloud
+              whenever world_points is absent
+            - depth_conf: Depth confidence (S, H, W), optional
         conf_thres: Percentage of low-confidence points to filter out
         filter_by_frames: Frame filter specification ("all" or frame index)
         mask_black_bg: Mask out black background pixels
@@ -97,13 +134,13 @@ def predictions_to_glb(
             )
         else:
             print("Warning: world_points not found, falling back to depth-based points")
-            pred_world_points = predictions["world_points_from_depth"]
+            pred_world_points = _world_points_from_depth(predictions)
             pred_world_points_conf = predictions.get(
                 "depth_conf", np.ones_like(pred_world_points[..., 0])
             )
     else:
         print("Using Depthmap and Camera Branch")
-        pred_world_points = predictions["world_points_from_depth"]
+        pred_world_points = _world_points_from_depth(predictions)
         pred_world_points_conf = predictions.get(
             "depth_conf", np.ones_like(pred_world_points[..., 0])
         )
