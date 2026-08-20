@@ -1045,7 +1045,8 @@ class PointCloudViewer:
             normalized_indices = np.array(list(range(num_cameras))) / (num_cameras - 1)
         else:
             normalized_indices = np.array([0.0])
-        cmap = cm.get_cmap('viridis')
+        import matplotlib
+        cmap = matplotlib.colormaps['viridis']  # cm.get_cmap removed in matplotlib 3.9+
         self.camera_colors = cmap(normalized_indices)
         return pcs, step_list
 

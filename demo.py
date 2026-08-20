@@ -20,10 +20,12 @@ Usage:
 
 import argparse
 import glob
+import json
 import os
 import sys
 import tempfile
 import time
+from pathlib import Path
 
 # Must be set before `import torch` / any CUDA init. Reduces the reserved-vs-allocated
 # memory gap by letting the caching allocator grow segments on demand instead of
@@ -304,6 +306,42 @@ def postprocess(predictions, images):
     return predictions, images_cpu
 
 
+def export_results(predictions, output_dir):
+    """Export extrinsic/intrinsic to poses.json and depth maps as grayscale PNGs."""
+    output_dir = Path(output_dir)
+    depth_dir = output_dir / "depth"
+    depth_dir.mkdir(parents=True, exist_ok=True)
+
+    extrinsic = predictions["extrinsic"].numpy()  # (S, 3, 4), c2w
+    intrinsic = predictions["intrinsic"].numpy()  # (S, 3, 3)
+    depth = predictions["depth"].numpy()  # (S, H, W, 1)
+
+    poses = {
+        "note": "extrinsic is camera-to-world (c2w), 3x4. depth PNGs are per-frame "
+                "min/max normalized to 0-255 for visualization -- not metric distance.",
+        "frames": [
+            {
+                "frame": i,
+                "extrinsic": extrinsic[i].tolist(),
+                "intrinsic": intrinsic[i].tolist(),
+            }
+            for i in range(extrinsic.shape[0])
+        ],
+    }
+    with open(output_dir / "poses.json", "w") as f:
+        json.dump(poses, f, indent=2)
+
+    for i in range(depth.shape[0]):
+        d = depth[i, ..., 0]
+        d_min, d_max = d.min(), d.max()
+        d_norm = (d - d_min) / (d_max - d_min + 1e-8)
+        d_u8 = (d_norm * 255).clip(0, 255).astype(np.uint8)
+        cv2.imwrite(str(depth_dir / f"{i:06d}.png"), d_u8)
+
+    print(f"Exported {extrinsic.shape[0]} poses to {output_dir / 'poses.json'}")
+    print(f"Exported {depth.shape[0]} depth maps to {depth_dir}")
+
+
 def prepare_for_visualization(predictions, images=None):
     """Convert predictions to the unbatched NumPy format used by vis code."""
     vis_predictions = {}
@@ -413,6 +451,9 @@ def main():
                         help="Save sky mask visualizations (original | mask | overlay) to this directory")
     parser.add_argument("--export_preprocessed", type=str, default=None,
                         help="Export stride-sampled, resized/cropped images to this folder")
+    parser.add_argument("--export_results", type=str, default=None,
+                        help="Export per-frame extrinsic/intrinsic to poses.json and depth maps "
+                             "as grayscale PNGs (per-frame min/max normalized, not metric) to this folder")
 
     args = parser.parse_args()
     assert args.image_folder or args.video_path, \
@@ -579,6 +620,9 @@ def main():
         images_for_post = images
 
     predictions, images_cpu = postprocess(predictions, images_for_post)
+
+    if args.export_results:
+        export_results(predictions, args.export_results)
 
     # ── Visualize ────────────────────────────────────────────────────────────
     try:
