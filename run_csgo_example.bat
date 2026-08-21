@@ -12,7 +12,19 @@ set "HDF5_PATH=C:\csgo_data\hdf5_dm_july2021_1.hdf5"
 set "IMAGE_FOLDER=C:\csgo_data\lingbot_map_example\csgo_dm_1"
 set "MODEL_PATH=%USERPROFILE%\.cache\huggingface\hub\models--robbyant--lingbot-map\snapshots\204754b72bb24f561f8d7e7e1e4e4cd9e809adf9\lingbot-map.pt"
 if not "%~1"=="" set "MODEL_PATH=%~1"
-set "EXPORT_DIR=C:\csgo_data\lingbot_map_example\csgo_dm_1_results"
+
+REM Each run gets its own numbered rollout_NNN subfolder instead of one fixed
+REM EXPORT_DIR, so results from separate runs don't collide / get skipped.
+set "RESULTS_BASE=C:\csgo_data\lingbot_map_example\csgo_dm_1_results"
+set /a "ROLLOUT=0"
+:find_rollout
+set "ROLLOUT_PADDED=00!ROLLOUT!"
+set "ROLLOUT_PADDED=!ROLLOUT_PADDED:~-3!"
+if exist "%RESULTS_BASE%\rollout_!ROLLOUT_PADDED!" (
+    set /a "ROLLOUT+=1"
+    goto :find_rollout
+)
+set "EXPORT_DIR=%RESULTS_BASE%\rollout_!ROLLOUT_PADDED!"
 
 REM --- 32GB-GPU memory defaults (500-frame streaming OOM'd at 64-window/4-iter) ---
 REM expandable_segments cuts allocator fragmentation; the two flags lower the forward
@@ -40,7 +52,9 @@ REM --use_sdpa: FlashInfer isn't installed (setup.bat skips it); SDPA is PyTorch
 REM native attention fallback -- slower but works with no extra install.
 REM --export_results: always saves poses.json + depth PNGs to %EXPORT_DIR%, since
 REM demo.py's viser viewer is otherwise in-memory only and gives you nothing on disk.
+REM No skip-existing check needed -- rollout_NNN numbering above guarantees EXPORT_DIR
+REM is always fresh.
 python demo.py --model_path "%MODEL_PATH%" --image_folder "%IMAGE_FOLDER%" --use_sdpa --export_results "%EXPORT_DIR%" --kv_cache_sliding_window %KV_WINDOW% --camera_num_iterations %CAM_ITERS% %2 %3 %4 %5
 
 echo.
-echo Results saved to: %EXPORT_DIR%
+echo Results: %EXPORT_DIR%

@@ -143,7 +143,12 @@ def load_and_preprocess_images(image_path_list, fx=None, fy=None, cx=None, cy=No
 
     def _load_one(idx_path):
         i, image_path = idx_path
-        img = Image.open(image_path)
+        # image_path may already be a decoded PIL Image (e.g. in-memory video
+        # frames) instead of a path on disk -- skip the disk read in that case.
+        if isinstance(image_path, Image.Image):
+            img = image_path
+        else:
+            img = Image.open(image_path)
         # Honor EXIF orientation (Sony / iPhone portrait shots store landscape
         # pixels + Orientation=6/8); without this the resize/crop below sees
         # raw landscape pixels and outputs a landscape frame.

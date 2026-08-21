@@ -19,14 +19,18 @@ set "CAM_ITERS=1"
 
 call .\.venv\Scripts\activate.bat
 
-for %%V in ("%DATA_DIR%\*.mp4") do (
-    set "EXPORT_DIR=%DATA_DIR%\%%~nV_results"
+REM Limited to a single clip for now -- change *.mp4 back to process the whole folder.
+for %%V in ("%DATA_DIR%\0.mp4") do (
+    set "EXPORT_DIR=%DATA_DIR%\results\%%~nV"
     echo.
     echo Running lingbot-map on %%~nxV  -^>  !EXPORT_DIR!
     echo.
-    python demo.py --model_path "%MODEL_PATH%" --video_path "%%~fV" --fps 10 --use_sdpa --export_results "!EXPORT_DIR!" --kv_cache_sliding_window %KV_WINDOW% --camera_num_iterations %CAM_ITERS%
-    echo.
-    echo Results saved to: !EXPORT_DIR!
+    if exist "!EXPORT_DIR!\poses.json" (
+        echo   SKIP -- already done ^(poses.json exists^)
+    ) else (
+        python demo.py --model_path "%MODEL_PATH%" --video_path "%%~fV" --fps 10 --use_sdpa --export_results "!EXPORT_DIR!" --kv_cache_sliding_window %KV_WINDOW% --camera_num_iterations %CAM_ITERS%
+    )
+    echo   Results: !EXPORT_DIR!
 )
 
 endlocal
