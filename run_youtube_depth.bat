@@ -47,7 +47,11 @@ for %%V in ("%DATA_DIR%\*.mp4") do (
         REM RGB comparisons to <EXPORT_DIR>\rgb (matching depth\ naming), no need to
         REM separately dump all sampled frames.
         python demo.py --model_path "%MODEL_PATH%" --video_path "%%~fV" --fps %FPS% !FIRST_K_FLAG! --use_sdpa --export_results "!EXPORT_DIR!" --kv_cache_sliding_window %KV_WINDOW% --camera_num_iterations %CAM_ITERS%
-        if errorlevel 1 echo   FAILED: %%~nxV
+        if errorlevel 1 (
+            echo   FAILED: %%~nxV
+        ) else (
+            python C:\workspace\world\lingbot-map\self_test_reprojection.py "!EXPORT_DIR!" --frame 0
+        )
     )
     echo   Results: !EXPORT_DIR!
 )

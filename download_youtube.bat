@@ -9,13 +9,28 @@ REM   download_youtube.bat <url>                 -> saves as <video_id>.mp4
 REM   download_youtube.bat <url> cyberpunk       -> saves as cyberpunk.mp4
 REM   download_youtube.bat <url> cyberpunk 1080  -> cap height at 1080p
 
-set "URL=%~1"
-if "%URL%"=="" (
+REM NOTE: cmd.exe splits %1/%2/%3 on space, comma, semicolon, AND "=" -- YouTube
+REM URLs contain "=" (e.g. watch?v=XXXX), which silently shifts NAME/MAXH into the
+REM wrong slots if the URL isn't quoted at the call site. Parse the raw tail via %*
+REM instead (FOR /F's default delimiters are space/tab only, so "=" survives intact),
+REM so this works whether or not the caller quotes the URL.
+set "ARGS=%*"
+if "%ARGS%"=="" (
     echo Usage: download_youtube.bat ^<youtube_url^> [name] [max_height]
     exit /b 1
 )
-set "NAME=%~2"
-set "MAXH=%~3"
+for /f "tokens=1*" %%A in ("%ARGS%") do (
+    set "URL=%%~A"
+    set "REST=%%B"
+)
+set "NAME="
+set "MAXH="
+if defined REST (
+    for /f "tokens=1,2" %%A in ("%REST%") do (
+        set "NAME=%%~A"
+        set "MAXH=%%~B"
+    )
+)
 
 set "OUT_DIR=C:\workspace\data\youtube"
 if not exist "%OUT_DIR%" mkdir "%OUT_DIR%"

@@ -27,11 +27,20 @@ reprojection tests currently operate on frames **0 and 20**.
 |---|---|---|
 | Convention self-test | `self_test_reprojection.py` | Unproject a frame's depth → world → reproject into the same frame. Error ~0px ⇒ extrinsic/intrinsic convention correct. |
 | Reprojection overlay | `show_reprojection.py` | Same-frame = depth-colored overlay (visual PASS). Cross-frame (0→20) = frame 0's geometry seen from frame 20 (exposes depth/pose drift). |
+| 10-frame reproj row | `draw_reproj_row.py` | A strip of 10 consecutive frames. `--mode own` (default) = each frame's own depth; `track` = frame 0's cloud into each; `accumulate` = each frame's cloud into frame 0. Needs `--comparison_stride 1`. |
 | OpenCV pose compare | `compare_opencv_poses.py` | ORB → essential matrix → recoverPose vs lingbot extrinsics (rotation geodesic + translation-direction error). |
 | OpenCV FOV compare | `compare_opencv_fov.py` | Focal self-calibration from the fundamental matrix vs lingbot's FOV. |
 
-One-shot wrappers: `run_self_test.bat` (CS:GO), `run_self_test_all.bat` (all datasets,
-reprojection only), `run_cyberpunk_test.bat` (cyberpunk extract + self-test + overlays).
+One-shot wrappers (each: extract → self-test → overlays → 10-frame row):
+`run_self_test.bat [start_frame]` (CS:GO, e.g. `250` for a later segment),
+`run_cyberpunk_test.bat`, `run_trackmania_test.bat`, and `run_self_test_all.bat`
+(reprojection check across all datasets, no GPU). Bash equivalents exist for every `.bat`
+(`*.sh` + shared `_env.sh`, WSL `/mnt/c` paths, editable at the top for a Linux host).
+
+Relevant `demo.py` flags:
+- `--no_viser` — export and exit, skip the blocking point-cloud viewer (used by all test bats).
+- `--start_frame N` — skip the first N frames (video: seek past intro/menu; image folder: start further in).
+- `--comparison_stride N` — export raw depth + RGB every Nth frame (default 20; **1** = every frame, needed for the 10-frame row).
 
 ## Results
 
@@ -60,12 +69,21 @@ is self-consistent, NOT that depth is accurate — a flat 2D menu round-trips to
 
 ## Reproducing
 
+Windows:
 ```
 cd /d C:\workspace\world\lingbot-map
 call .\.venv\Scripts\activate.bat
-run_self_test.bat                 REM CS:GO 21-frame self-test (needs GPU)
+run_self_test.bat                 REM CS:GO 21-frame self-test + overlays + 10-frame row (needs GPU)
+run_self_test.bat 250             REM same, but CS:GO frames 250-270
+run_cyberpunk_test.bat            REM cyberpunk gameplay (skips menu) extract + tests
+run_trackmania_test.bat           REM trackmania clip 1 extract + tests
 run_self_test_all.bat             REM reprojection check across all datasets (no GPU)
-run_cyberpunk_test.bat            REM cyberpunk gameplay extract + self-test + overlays
+```
+
+Bash/WSL (paths default to /mnt/c; edit _env.sh for another host):
+```
+cd /mnt/c/workspace/world/lingbot-map
+./run_self_test.sh                # or ./run_cyberpunk_test.sh, ./run_trackmania_test.sh, ...
 ```
 
 Memory-safe defaults are baked into `demo.py` (`--kv_cache_sliding_window 32`,

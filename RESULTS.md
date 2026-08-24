@@ -144,3 +144,18 @@ Not available for these three runs (see note above). Re-run `run_csgo_example.ba
 `poses.json` first so the skip-existing check doesn't short-circuit) to populate
 `point_cloud_confidence` -- reports overall mean/std/min/max confidence, the fraction
 of points kept at `--conf_threshold`, and per-frame `depth_conf_mean`.
+
+## Reprojection self-test on new clips (wreckfest, witcher)
+
+Two new Youtube clips run through `run_youtube_depth.bat`/`run_witcher_depth.bat`
+(fps=5, first 1 min, 300 sampled frames each): `wreckfest.mp4` and `witcher.mp4`.
+`self_test_reprojection.py --frame 0` on `witcher_results`: **PASS**, 0.0000px mean/max/
+median error, 152292/152292 valid points -- confirms the c2w/w2c fix above still holds
+on new data. `wreckfest_results` initially failed mid-run (streaming inference collapsed
+from ~5-6 it/s to 20-50+ s/it around frame 40, consistent with GPU contention from a
+concurrent job on this shared 32GB card) and had to be rerun once the GPU was clear.
+
+`frame_strip.png` (10 evenly-spaced `rgb/` frames, every 20th sampled frame) confirms
+the sampled content matches the source clip, including catching a solid-black frame 0
+(an intro/title-card moment at this point in the clip, not a pipeline bug -- verified
+by checking later frames show real gameplay).
