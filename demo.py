@@ -151,7 +151,7 @@ def load_model(args, device):
 
     if args.model_path:
         print(f"Loading checkpoint: {args.model_path}")
-        ckpt = torch.load(args.model_path, map_location=device, weights_only=False)
+        ckpt = torch.load(args.model_path, map_location="cpu", weights_only=False)
         state_dict = ckpt.get("model", ckpt)
         missing, unexpected = model.load_state_dict(state_dict, strict=False)
         if missing:
@@ -465,7 +465,13 @@ def main():
         print(f"Casting aggregator to {dtype} (heads kept in fp32)")
         model.aggregator = model.aggregator.to(dtype=dtype)
 
-    images = images.to(device)
+    if device.type == "cuda":
+        # Keep the full clip on CPU (pinned for fast async H2D copies).
+        # inference_streaming/inference_windowed already slice off one
+        # frame at a time and move just that slice to GPU internally, so
+        # eagerly moving the whole sequence here only wastes VRAM holding
+        # thousands of frames' pixels for the ~1 that's ever in flight.
+        images = images.pin_memory()
     num_frames = images.shape[0]
     print(f"Input: {num_frames} frames, shape {tuple(images.shape)}")
     print(f"Mode: {args.mode}")
