@@ -123,12 +123,26 @@ pip install --index-url https://pypi.org/simple flashinfer-python
 > `--index-url https://pypi.org/simple` is only needed if your default pip index is an internal mirror that doesn't have `flashinfer-python`.
 > (Optional) For faster first-use, you can additionally install a CUDA-specific JIT cache: `pip install flashinfer-jit-cache -f https://flashinfer.ai/whl/cu128/flashinfer-jit-cache/`.
 > See [FlashInfer installation](https://docs.flashinfer.ai/installation.html) for details. If FlashInfer is not installed, the model falls back to SDPA (PyTorch native attention) via `--use_sdpa`.
+> On CPU (`--device cpu`, the default), SDPA is selected automatically — FlashInfer is not required.
 
 **5. Visualization dependencies (optional)**
 
 ```bash
 pip install -e ".[vis]"
 ```
+
+**6. CPU / low-spec machines (optional)**
+
+If you do not have a capable GPU, cannot install FlashInfer, or have limited VRAM (the checkpoint is ~4.4 GB), install CPU PyTorch and run with `--device cpu`:
+
+```bash
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+pip install -e .
+python demo.py --model_path /path/to/checkpoint.pt \
+    --image_folder /path/to/images/ --device cpu
+```
+
+`--device auto` uses CUDA only when free VRAM looks sufficient (~8 GiB+); otherwise it falls back to CPU. Laptop GPUs with ≤4–6 GB VRAM typically need `--device cpu`.
 
 ## 📦 Model Download
 
@@ -147,6 +161,8 @@ After installation, run your first scene with one command:
 python demo.py --model_path /path/to/lingbot-map.pt \
     --image_folder example/courthouse --mask_sky
 ```
+
+> **CPU / low-spec:** `--device` defaults to `cpu` (SDPA, no FlashInfer required). Use `--device cuda` or `--device auto` when you have sufficient GPU VRAM.
 
 This launches an interactive [viser](https://github.com/nerfstudio-project/viser) viewer at `http://localhost:8080`. See [Interactive Demo](#-interactive-demo-demopy) below for the full set of scenes and flags, or jump to [Offline Rendering Pipeline](#-offline-rendering-pipeline-demo_renderbatch_demopy) for long-sequence batch rendering.
 
@@ -309,10 +325,21 @@ python demo.py --model_path /path/to/checkpoint.pt \
     --image_folder /path/to/images/ --use_sdpa
 ```
 
+SDPA is also selected automatically on CPU (`--device cpu`, the default) or when FlashInfer is not installed — `--use_sdpa` is only needed to force SDPA on CUDA.
+
+#### CPU inference (low-spec / no GPU)
+
+```bash
+python demo.py --model_path /path/to/checkpoint.pt \
+    --image_folder /path/to/images/ --device cpu \
+    --keyframe_interval 4 --num_scale_frames 4
+```
+
 #### Running on Limited GPU Memory
 
 If you run into out-of-memory issues, try one (or both) of the following:
 
+- **`--device cpu`** or **`--device auto`** — prefer host RAM when VRAM cannot hold the ~4.4 GB checkpoint (typical on ≤4–6 GB laptop GPUs).
 - **`--offload_to_cpu`** — offload per-frame predictions to CPU during inference (on by default; use `--no-offload_to_cpu` only if you have memory to spare).
 - **`--num_scale_frames 2`** — reduce the number of bidirectional scale frames from the default 8 down to 2, which shrinks the activation peak of the initial scale phase.
 

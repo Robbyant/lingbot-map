@@ -166,7 +166,8 @@ class GCTBase(nn.Module, PyTorchModelHubMixin, ABC):
 
         camera_sliding_window = sliding_window_size if self.enable_camera_sliding_window else -1
 
-        with torch.amp.autocast('cuda', enabled=False):
+        device_type = aggregated_tokens_list_fp32[0].device.type
+        with torch.amp.autocast(device_type=device_type, enabled=False):
             pose_enc_list = self.camera_head(
                 aggregated_tokens_list_fp32,
                 mask=mask,
@@ -194,7 +195,8 @@ class GCTBase(nn.Module, PyTorchModelHubMixin, ABC):
         aggregated_tokens_list_fp32 = [t.float() for t in aggregated_tokens_list]
         images_fp32 = images.float()
 
-        with torch.amp.autocast('cuda', enabled=False):
+        device_type = aggregated_tokens_list_fp32[0].device.type
+        with torch.amp.autocast(device_type=device_type, enabled=False):
             depth, depth_conf = self.depth_head(
                 aggregated_tokens_list_fp32,
                 images=images_fp32,
@@ -216,7 +218,8 @@ class GCTBase(nn.Module, PyTorchModelHubMixin, ABC):
         aggregated_tokens_list_fp32 = [t.float() for t in aggregated_tokens_list]
         images_fp32 = images.float()
 
-        with torch.amp.autocast('cuda', enabled=False):
+        device_type = aggregated_tokens_list_fp32[0].device.type
+        with torch.amp.autocast(device_type=device_type, enabled=False):
             pts3d, pts3d_conf = self.point_head(
                 aggregated_tokens_list_fp32,
                 images=images_fp32,
@@ -238,7 +241,8 @@ class GCTBase(nn.Module, PyTorchModelHubMixin, ABC):
         aggregated_tokens_list_fp32 = [t.float() for t in aggregated_tokens_list]
         images_fp32 = images.float()
 
-        with torch.amp.autocast('cuda', enabled=False):
+        device_type = aggregated_tokens_list_fp32[0].device.type
+        with torch.amp.autocast(device_type=device_type, enabled=False):
             pts3d, pts3d_conf = self.local_point_head(
                 aggregated_tokens_list_fp32,
                 images=images_fp32,
