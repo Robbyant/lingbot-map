@@ -21,6 +21,7 @@ Usage:
 import argparse
 import glob
 import os
+import platform
 import sys
 import tempfile
 import time
@@ -38,6 +39,11 @@ import time
 if "--compile" not in sys.argv:
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
+if platform.system() == "Darwin" and platform.machine() in {"arm64", "aarch64"}:
+    # Apple Silicon runs most inference on MPS. This lets unsupported kernels
+    # fall back to CPU instead of failing mid-run.
+    os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+
 import cv2
 import numpy as np
 import torch
@@ -47,6 +53,10 @@ from tqdm.auto import tqdm
 from lingbot_map.utils.pose_enc import pose_encoding_to_extri_intri
 from lingbot_map.utils.geometry import closed_form_inverse_se3_general
 from lingbot_map.utils.load_fn import load_and_preprocess_images
+
+
+def mps_is_available():
+    return hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
 
 
 # =============================================================================
@@ -128,8 +138,29 @@ def load_images(image_folder=None, video_path=None, fps=10, image_ext=".jpg,.png
 # Model loading
 # =============================================================================
 
+def select_device(device_name="auto"):
+    """Select an inference device, preferring CUDA, then Apple Silicon MPS."""
+    if device_name == "auto":
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        if mps_is_available():
+            return torch.device("mps")
+        return torch.device("cpu")
+
+    device = torch.device(device_name)
+    if device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA was requested, but torch.cuda.is_available() is false.")
+    if device.type == "mps" and not mps_is_available():
+        raise RuntimeError("MPS was requested, but torch.backends.mps.is_available() is false.")
+    return device
+
+
 def load_model(args, device):
     """Load GCTStream model from checkpoint."""
+    if device.type != "cuda" and not args.use_sdpa:
+        print(f"Device {device.type} does not support FlashInfer; enabling SDPA attention.")
+        args.use_sdpa = True
+
     if getattr(args, "mode", "streaming") == "windowed":
         from lingbot_map.models.gct_stream_window import GCTStream
     else:
@@ -354,6 +385,8 @@ def main():
 
     # Model
     parser.add_argument("--model_path", type=str, required=True)
+    parser.add_argument("--device", type=str, default="auto", choices=["auto", "cuda", "mps", "cpu"],
+                        help="Inference device. auto prefers CUDA, then Apple Silicon MPS, then CPU.")
     parser.add_argument("--image_size", type=int, default=518)
     parser.add_argument("--patch_size", type=int, default=14)
 
@@ -424,7 +457,8 @@ def main():
     assert args.image_folder or args.video_path, \
         "Provide --image_folder or --video_path"
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = select_device(args.device)
+    print(f"Using device: {device}")
 
     # ── Load images & model ──────────────────────────────────────────────────
     t0 = time.time()
@@ -451,8 +485,10 @@ def main():
     print(f"Total load time: {time.time() - t0:.1f}s")
 
     # Pick inference dtype; autocast still runs for the ops that need fp32 (e.g. LayerNorm).
-    if torch.cuda.is_available():
+    if device.type == "cuda":
         dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
+    elif device.type == "mps":
+        dtype = torch.bfloat16
     else:
         dtype = torch.float32
 
@@ -547,8 +583,13 @@ def main():
     t0 = time.time()
 
     output_device = torch.device("cpu") if args.offload_to_cpu else None
+    autocast_context = torch.amp.autocast(
+        device.type,
+        dtype=dtype,
+        enabled=dtype != torch.float32,
+    )
 
-    with torch.no_grad(), torch.amp.autocast("cuda", dtype=dtype):
+    with torch.no_grad(), autocast_context:
         if args.mode == "streaming":
             predictions = model.inference_streaming(
                 images,
