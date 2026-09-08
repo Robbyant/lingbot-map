@@ -142,18 +142,18 @@ def _compute_flow_magnitude(
     cam_coords = torch.einsum('bij,hwj->bhwi', intr_inv, pixel_coords)
     cam_pts = cam_coords * depth.unsqueeze(-1)
 
-    c2w = torch.zeros(B, 4, 4, device=device, dtype=dtype)
-    c2w[:, :3, :] = cur_ext
-    c2w[:, 3, 3] = 1.0
+    cur_w2c = torch.zeros(B, 4, 4, device=device, dtype=dtype)
+    cur_w2c[:, :3, :] = cur_ext
+    cur_w2c[:, 3, 3] = 1.0
+    cur_c2w = closed_form_inverse_se3(cur_w2c)
 
     ones_hw = torch.ones(B, Hs, Ws, 1, device=device, dtype=dtype)
     cam_pts_h = torch.cat([cam_pts, ones_hw], dim=-1)
-    world_pts = torch.einsum('bij,bhwj->bhwi', c2w, cam_pts_h)[..., :3]
+    world_pts = torch.einsum('bij,bhwj->bhwi', cur_c2w, cam_pts_h)[..., :3]
 
-    kf_c2w = torch.zeros(B, 4, 4, device=device, dtype=dtype)
-    kf_c2w[:, :3, :] = kf_ext
-    kf_c2w[:, 3, 3] = 1.0
-    kf_w2c = closed_form_inverse_se3(kf_c2w)
+    kf_w2c = torch.zeros(B, 4, 4, device=device, dtype=dtype)
+    kf_w2c[:, :3, :] = kf_ext
+    kf_w2c[:, 3, 3] = 1.0
     world_pts_h = torch.cat([world_pts, ones_hw], dim=-1)
     kf_cam_pts = torch.einsum('bij,bhwj->bhwi', kf_w2c, world_pts_h)[..., :3]
 
