@@ -219,7 +219,7 @@ def _warm_streaming(model, images, scale_frames, warm_stream_n, dtype,
     for _ in range(passes):
         model.clean_kv_cache()
         torch.compiler.cudagraph_mark_step_begin()
-        with torch.no_grad(), torch.amp.autocast("cuda", dtype=dtype):
+        with torch.no_grad(), torch.amp.autocast(images.device.type, dtype=dtype, enabled=dtype != torch.float32):
             model.forward(
                 warm_scale,
                 num_frame_for_scale=scale_frames,
@@ -231,7 +231,7 @@ def _warm_streaming(model, images, scale_frames, warm_stream_n, dtype,
             if not is_keyframe:
                 model._set_skip_append(True)
             torch.compiler.cudagraph_mark_step_begin()
-            with torch.no_grad(), torch.amp.autocast("cuda", dtype=dtype):
+            with torch.no_grad(), torch.amp.autocast(images.device.type, dtype=dtype, enabled=dtype != torch.float32):
                 model.forward(
                     warm_stream[:, i:i + 1],
                     num_frame_for_scale=scale_frames,
@@ -424,7 +424,12 @@ def main():
     assert args.image_folder or args.video_path, \
         "Provide --image_folder or --video_path"
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
 
     # ── Load images & model ──────────────────────────────────────────────────
     t0 = time.time()
@@ -453,6 +458,8 @@ def main():
     # Pick inference dtype; autocast still runs for the ops that need fp32 (e.g. LayerNorm).
     if torch.cuda.is_available():
         dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
+    elif device.type == "mps":
+        dtype = torch.bfloat16
     else:
         dtype = torch.float32
 
@@ -548,7 +555,8 @@ def main():
 
     output_device = torch.device("cpu") if args.offload_to_cpu else None
 
-    with torch.no_grad(), torch.amp.autocast("cuda", dtype=dtype):
+    autocast_ctx = torch.amp.autocast(device.type, dtype=dtype, enabled=dtype != torch.float32)
+    with torch.no_grad(), autocast_ctx:
         if args.mode == "streaming":
             predictions = model.inference_streaming(
                 images,
