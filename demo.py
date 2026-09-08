@@ -20,10 +20,12 @@ Usage:
 
 import argparse
 import glob
+import json
 import os
 import sys
 import tempfile
 import time
+from pathlib import Path
 
 # Must be set before `import torch` / any CUDA init. Reduces the reserved-vs-allocated
 # memory gap by letting the caching allocator grow segments on demand instead of
@@ -45,7 +47,7 @@ from PIL import Image
 from tqdm.auto import tqdm
 
 from lingbot_map.utils.pose_enc import pose_encoding_to_extri_intri
-from lingbot_map.utils.geometry import closed_form_inverse_se3_general
+from lingbot_map.utils.geometry import closed_form_inverse_se3_general, unproject_depth_map_to_point_map
 from lingbot_map.utils.load_fn import load_and_preprocess_images
 
 
@@ -55,7 +57,7 @@ from lingbot_map.utils.load_fn import load_and_preprocess_images
 
 def load_images(image_folder=None, video_path=None, fps=10, image_ext=".jpg,.png,.JPG",
                 first_k=None, stride=1, image_size=518, patch_size=14, num_workers=8,
-                rotate_clockwise_90=False):
+                rotate_clockwise_90=False, start_frame=0):
     """Load images from folder or video and preprocess into a tensor.
 
     Returns:
@@ -63,36 +65,59 @@ def load_images(image_folder=None, video_path=None, fps=10, image_ext=".jpg,.png
         and the folder containing the source images (for sky mask caching etc.).
     """
     if video_path is not None:
+        # Read the video directly and sample every interval-th frame IN MEMORY as a
+        # PIL Image -- no per-frame temp .jpg written to disk (the old approach broke
+        # on a full disk: a write would silently fail mid-extraction, then loading
+        # would crash later with FileNotFoundError on the missing frame). first_k is
+        # enforced DURING decode as a hard cap, so a long clip is never fully decoded
+        # (a 14-min video would otherwise sample thousands of frames and OOM the model).
         video_name = os.path.splitext(os.path.basename(video_path))[0]
-        out_dir = os.path.join(os.path.dirname(video_path), f"{video_name}_frames")
-        os.makedirs(out_dir, exist_ok=True)
         cap = cv2.VideoCapture(video_path)
         src_fps = cap.get(cv2.CAP_PROP_FPS) or 30
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         interval = max(1, round(src_fps / fps))
+        # Seek past the first `start_frame` source frames (skip intros/menus) before sampling.
+        if start_frame and start_frame > 0:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, int(start_frame))
+            print(f"Seeking to source frame {int(start_frame)} "
+                  f"(~{start_frame / src_fps:.1f}s in) before sampling")
+        cap_k = first_k if (first_k is not None and first_k > 0) else None
         idx, saved = 0, []
-        pbar = tqdm(total=total_frames, desc="Extracting frames", unit="frame")
+        pbar = tqdm(total=total_frames, desc="Reading video", unit="frame")
         while True:
             ret, frame = cap.read()
             if not ret:
                 break
             if idx % interval == 0:
-                path = os.path.join(out_dir, f"{len(saved):06d}.jpg")
-                cv2.imwrite(path, frame)
-                saved.append(path)
+                # Downsize immediately, before appending -- holding thousands of
+                # full-resolution frames in `saved` until the final crop/resize step
+                # exhausts system RAM on long clips. load_and_preprocess_images still
+                # does the exact crop/resize to image_size; this is just a cheap
+                # pre-shrink so the in-memory frame list stays small.
+                h, w = frame.shape[:2]
+                if max(h, w) > image_size:
+                    scale = image_size / max(h, w)
+                    frame = cv2.resize(frame, (round(w * scale), round(h * scale)), interpolation=cv2.INTER_AREA)
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                saved.append(Image.fromarray(frame_rgb))
+                if cap_k is not None and len(saved) >= cap_k:
+                    break
             idx += 1
             pbar.update(1)
         pbar.close()
         cap.release()
         paths = saved
-        resolved_folder = out_dir
-        print(f"Extracted {len(paths)} frames from video ({total_frames} total, interval={interval})")
+        resolved_folder = None  # no on-disk frame folder -- sky-mask caching needs a real path if used
+        print(f"Read {len(paths)} frames from video "
+              f"(sampled every {interval} of {total_frames}, cap={cap_k})")
     else:
         exts = image_ext.split(",")
         paths = []
         for ext in exts:
             paths.extend(glob.glob(os.path.join(image_folder, f"*{ext}")))
         paths = sorted(paths)
+        if start_frame and start_frame > 0:
+            paths = paths[int(start_frame):]  # skip the first N images (start further into the set)
         resolved_folder = image_folder
 
     if first_k is not None and first_k > 0:
@@ -304,6 +329,178 @@ def postprocess(predictions, images):
     return predictions, images_cpu
 
 
+def override_intrinsics_with_known_fov(predictions, fov_deg, img_w=None):
+    """Replace the model's estimated fx/fy with the value implied by a known
+    ground-truth horizontal FOV (e.g. CS:GO's fixed 90 deg), assuming square pixels
+    (fx == fy). cx/cy are left as-is (already just the image center). Also drops any
+    precomputed world_points so export_point_cloud_ply's depth-based fallback
+    re-derives the point cloud using the corrected intrinsics instead of stale ones."""
+    intrinsic = predictions["intrinsic"]  # (S, 3, 3)
+    if img_w is None:
+        img_w = predictions["depth"].shape[2]  # (S, H, W, 1)
+    fx_corrected = (img_w / 2) / np.tan(np.radians(fov_deg / 2))
+    intrinsic[:, 0, 0] = fx_corrected
+    intrinsic[:, 1, 1] = fx_corrected
+    predictions.pop("world_points", None)
+    predictions.pop("world_points_conf", None)
+    print(f"Overrode fx/fy to {fx_corrected:.1f} (from {fov_deg} deg known FOV, "
+          f"width={img_w}); dropped precomputed world_points to force depth-based re-unprojection.")
+
+
+def export_point_cloud_ply(predictions, images, output_path, conf_threshold=1.5, downsample_factor=10):
+    """Export a merged (all-frames) point cloud as an ASCII PLY, colored from images,
+    with per-point confidence as a 4th vertex property. Returns confidence summary stats."""
+    if "world_points" in predictions:
+        world_points = predictions["world_points"].numpy()  # (S, H, W, 3)
+        conf = predictions.get("world_points_conf")
+        if conf is None:
+            conf = predictions["depth_conf"]
+        conf = conf.numpy()  # (S, H, W)
+    else:
+        # Point head output wasn't kept (e.g. some checkpoints/paths only produce
+        # depth) -- unproject depth via pose+intrinsics instead, same fallback the
+        # interactive viewer uses by default (use_point_map=False).
+        # unproject_depth_map_to_point_map -> depth_to_world_coords_points requires a
+        # w2c (cam-from-world) extrinsic, but predictions["extrinsic"] is c2w (see
+        # postprocess()'s "Convert w2c to c2w" comment) -- invert first, same as
+        # self_test_reprojection.py, or every point lands in the wrong place.
+        extrinsic_w2c = closed_form_inverse_se3_general(predictions["extrinsic"])[:, :3, :]
+        world_points = unproject_depth_map_to_point_map(
+            predictions["depth"], extrinsic_w2c, predictions["intrinsic"]
+        )
+        conf = predictions["depth_conf"].numpy()  # (S, H, W)
+    colors = images.numpy().transpose(0, 2, 3, 1)  # (S, H, W, 3), float in [0, 1]
+
+    pts = world_points.reshape(-1, 3)
+    conf_flat = conf.reshape(-1)
+    colors_flat = colors.reshape(-1, 3)
+
+    stats = {
+        "all_points_conf_mean": float(conf_flat.mean()),
+        "all_points_conf_std": float(conf_flat.std()),
+        "all_points_conf_min": float(conf_flat.min()),
+        "all_points_conf_max": float(conf_flat.max()),
+        "conf_threshold_used": conf_threshold,
+    }
+
+    mask = conf_flat >= conf_threshold
+    pts = pts[mask]
+    conf_kept = conf_flat[mask]
+    colors_flat = (colors_flat[mask] * 255).clip(0, 255).astype(np.uint8)
+
+    stats["num_points_total"] = int(conf_flat.shape[0])
+    stats["num_points_kept"] = int(pts.shape[0])
+    stats["kept_fraction"] = float(pts.shape[0] / max(conf_flat.shape[0], 1))
+    stats["kept_points_conf_mean"] = float(conf_kept.mean()) if conf_kept.size else None
+    stats["kept_points_conf_std"] = float(conf_kept.std()) if conf_kept.size else None
+
+    if downsample_factor > 1:
+        pts = pts[::downsample_factor]
+        conf_kept = conf_kept[::downsample_factor]
+        colors_flat = colors_flat[::downsample_factor]
+
+    with open(output_path, "w") as f:
+        f.write("ply\nformat ascii 1.0\n")
+        f.write(f"element vertex {pts.shape[0]}\n")
+        f.write("property float x\nproperty float y\nproperty float z\n")
+        f.write("property uchar red\nproperty uchar green\nproperty uchar blue\n")
+        f.write("property float confidence\n")
+        f.write("end_header\n")
+        for p, c, cf in zip(pts, colors_flat, conf_kept):
+            f.write(f"{p[0]} {p[1]} {p[2]} {c[0]} {c[1]} {c[2]} {cf}\n")
+
+    print(f"Exported {pts.shape[0]} points to {output_path} "
+          f"(kept {stats['kept_fraction']*100:.1f}% at conf>={conf_threshold}, "
+          f"conf mean={stats['all_points_conf_mean']:.3f} std={stats['all_points_conf_std']:.3f})")
+    return stats
+
+
+def export_results(predictions, images, output_dir, conf_threshold=1.5, downsample_factor=10,
+                   comparison_stride=20):
+    """Export extrinsic/intrinsic + point-cloud confidence stats to poses.json,
+    depth maps as grayscale PNGs, and a merged point cloud PLY (confidence per point)."""
+    output_dir = Path(output_dir)
+    depth_dir = output_dir / "depth"
+    depth_dir.mkdir(parents=True, exist_ok=True)
+
+    extrinsic = predictions["extrinsic"].numpy()  # (S, 3, 4), c2w
+    intrinsic = predictions["intrinsic"].numpy()  # (S, 3, 3)
+    depth = predictions["depth"].numpy()  # (S, H, W, 1)
+    depth_conf = predictions.get("depth_conf")
+    depth_conf = depth_conf.numpy() if depth_conf is not None else None
+
+    conf_stats = export_point_cloud_ply(
+        predictions, images, output_dir / "point_cloud.ply",
+        conf_threshold=conf_threshold, downsample_factor=downsample_factor,
+    )
+
+    img_w = images.shape[-1]
+    translations = extrinsic[:, :, 3]  # (S, 3), c2w camera positions
+
+    def _frame_entry(i):
+        fx, fy = float(intrinsic[i, 0, 0]), float(intrinsic[i, 1, 1])
+        entry = {
+            "frame": i,
+            "extrinsic": extrinsic[i].tolist(),
+            "intrinsic": intrinsic[i].tolist(),
+            "fx": fx,
+            "fy": fy,
+            "fov_h_deg": float(np.degrees(2 * np.arctan((img_w / 2) / fx))) if fx > 0 else None,
+            "camera_position": translations[i].tolist(),
+            "depth_conf_mean": float(depth_conf[i].mean()) if depth_conf is not None else None,
+        }
+        if i > 0:
+            entry["translation_delta"] = float(np.linalg.norm(translations[i] - translations[i - 1]))
+        return entry
+
+    poses = {
+        "note": "extrinsic is camera-to-world (c2w), 3x4. depth PNGs are per-frame "
+                "min/max normalized to 0-255 for visualization -- not metric distance. "
+                "fov_h_deg is the horizontal FOV implied by fx and the processed image "
+                "width -- compare against a known ground-truth FOV (e.g. CS:GO's fixed "
+                "90 deg) to sanity-check the model's intrinsics estimate. "
+                "point_cloud.ply carries a per-vertex 'confidence' property (raw model "
+                "confidence, unrelated to the 0-255 depth PNG normalization); "
+                "point_cloud_confidence summarizes it as an uncertainty proxy -- lower "
+                "confidence / higher spread means less trustworthy geometry in that region.",
+        "point_cloud_confidence": conf_stats,
+        "frames": [_frame_entry(i) for i in range(extrinsic.shape[0])],
+    }
+    with open(output_dir / "poses.json", "w") as f:
+        json.dump(poses, f, indent=2)
+
+    # Every 20th frame also gets its RAW (non-normalized) depth saved as .npy, so
+    # reprojection/self-consistency tests have real metric-scale values to work with
+    # -- the visualization PNG below is min/max-normalized per frame and lossy, not
+    # usable for reconstructing 3D points.
+    depth_raw_dir = output_dir / "depth_raw"
+    depth_raw_dir.mkdir(parents=True, exist_ok=True)
+    for i in range(depth.shape[0]):
+        d = depth[i, ..., 0]
+        d_min, d_max = d.min(), d.max()
+        d_norm = (d - d_min) / (d_max - d_min + 1e-8)
+        d_u8 = (d_norm * 255).clip(0, 255).astype(np.uint8)
+        cv2.imwrite(str(depth_dir / f"{i:06d}.png"), d_u8)
+        if i % comparison_stride == 0:
+            np.save(str(depth_raw_dir / f"{i:06d}.npy"), d)
+
+    # Every 20th source RGB frame, same {i:06d}.png naming as depth/, for eyeballing
+    # a depth prediction against its actual input frame side by side.
+    rgb_dir = output_dir / "rgb"
+    rgb_dir.mkdir(parents=True, exist_ok=True)
+    images_np = images.numpy()  # (S, 3, H, W), float in [0, 1]
+    num_rgb_saved = 0
+    for i in range(0, images_np.shape[0], comparison_stride):
+        frame = (images_np[i].transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
+        cv2.imwrite(str(rgb_dir / f"{i:06d}.png"), cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+        num_rgb_saved += 1
+
+    print(f"Exported {extrinsic.shape[0]} poses to {output_dir / 'poses.json'}")
+    print(f"Exported {depth.shape[0]} depth maps to {depth_dir}")
+    print(f"Exported {num_rgb_saved} comparison RGB frames (every {comparison_stride}) to {rgb_dir}")
+    print(f"Exported {num_rgb_saved} raw depth arrays (every {comparison_stride}) to {depth_raw_dir}")
+
+
 def prepare_for_visualization(predictions, images=None):
     """Convert predictions to the unbatched NumPy format used by vis code."""
     vis_predictions = {}
@@ -348,6 +545,9 @@ def main():
     parser.add_argument("--fps", type=int, default=10)
     parser.add_argument("--first_k", type=int, default=None)
     parser.add_argument("--stride", type=int, default=1)
+    parser.add_argument("--start_frame", type=int, default=0,
+                        help="Skip this many source frames before sampling (video only) -- "
+                            "e.g. to jump past an intro/menu. first_k still counts from there.")
     parser.add_argument("--rotate_clockwise_90", action="store_true",
                         help="Rotate source images 90° clockwise before preprocessing "
                              "(crop/resize then operates on the rotated aspect ratio)")
@@ -375,10 +575,12 @@ def main():
             "expand each window's actual-frame coverage to "
             "scale_frames + (window_size - scale_frames) * keyframe_interval.",
     )
-    parser.add_argument("--kv_cache_sliding_window", type=int, default=64)
-    parser.add_argument("--camera_num_iterations", type=int, default=4,
-                        help="Camera head iterative-refinement steps. Default 4; set 1 for faster inference "
-                            "(skips 3 refinement passes at a small accuracy cost).")
+    parser.add_argument("--kv_cache_sliding_window", type=int, default=32,
+                        help="KV-cache sliding window (frames). Default 32 keeps 500+ frame streaming "
+                            "within 32GB VRAM; raise to 64 for a bit more temporal context if you have headroom.")
+    parser.add_argument("--camera_num_iterations", type=int, default=1,
+                        help="Camera head iterative-refinement steps. Default 1 (fits 32GB + faster); "
+                            "raise to 4 for slightly higher pose accuracy if VRAM allows.")
     parser.add_argument("--use_sdpa", action="store_true", default=False,
                         help="Use SDPA backend (no flashinfer needed). Default: FlashInfer")
     parser.add_argument("--compile", action="store_true", default=False,
@@ -403,8 +605,14 @@ def main():
 
     # Visualization
     parser.add_argument("--port", type=int, default=8080)
+    parser.add_argument("--no_viser", action="store_true", default=False,
+                        help="Skip the blocking viser point-cloud viewer (for headless/self-test "
+                            "runs that just need the exported results, then exit).")
     parser.add_argument("--conf_threshold", type=float, default=1.5)
     parser.add_argument("--downsample_factor", type=int, default=10)
+    parser.add_argument("--comparison_stride", type=int, default=20,
+                        help="Export raw depth (.npy) + RGB every Nth frame. Default 20; set 1 to "
+                            "export every frame (needed for consecutive-frame reprojection strips).")
     parser.add_argument("--point_size", type=float, default=0.00001)
     parser.add_argument("--mask_sky", action="store_true", help="Apply sky segmentation to filter out sky points")
     parser.add_argument(
@@ -419,6 +627,14 @@ def main():
                         help="Save sky mask visualizations (original | mask | overlay) to this directory")
     parser.add_argument("--export_preprocessed", type=str, default=None,
                         help="Export stride-sampled, resized/cropped images to this folder")
+    parser.add_argument("--export_results", type=str, default=None,
+                        help="Export per-frame extrinsic/intrinsic to poses.json and depth maps "
+                             "as grayscale PNGs (per-frame min/max normalized, not metric) to this folder")
+    parser.add_argument("--override_fov_deg", type=float, default=None,
+                        help="Override the model's estimated fx/fy with the value implied by this "
+                             "known ground-truth horizontal FOV (e.g. 90 for CS:GO), assuming square "
+                             "pixels. Use when the source camera's FOV is known and the model's own "
+                             "intrinsics estimate is unreliable (see RESULTS.md).")
 
     args = parser.parse_args()
     assert args.image_folder or args.video_path, \
@@ -433,6 +649,7 @@ def main():
         fps=args.fps, first_k=args.first_k, stride=args.stride,
         image_size=args.image_size, patch_size=args.patch_size,
         rotate_clockwise_90=args.rotate_clockwise_90,
+        start_frame=args.start_frame,
     )
 
     # Export preprocessed images if requested
@@ -586,7 +803,18 @@ def main():
 
     predictions, images_cpu = postprocess(predictions, images_for_post)
 
+    if args.override_fov_deg is not None:
+        override_intrinsics_with_known_fov(predictions, args.override_fov_deg)
+
+    if args.export_results:
+        export_results(predictions, images_cpu, args.export_results,
+                        conf_threshold=args.conf_threshold, downsample_factor=args.downsample_factor,
+                        comparison_stride=args.comparison_stride)
+
     # ── Visualize ────────────────────────────────────────────────────────────
+    if args.no_viser:
+        print("Skipping viser viewer (--no_viser); results already exported.")
+        return 0
     try:
         from lingbot_map.vis import PointCloudViewer
         viewer = PointCloudViewer(
