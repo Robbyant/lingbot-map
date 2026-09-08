@@ -1,0 +1,702 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LingBot-Map Streaming Demo</title>
+  <style>
+    :root {
+      --bg: #f4f0e8;
+      --panel: rgba(255, 252, 246, 0.92);
+      --ink: #1f2a24;
+      --accent: #1d6b57;
+      --accent-soft: #d8ede5;
+      --line: rgba(31, 42, 36, 0.12);
+      --warn: #915c12;
+      --error: #9b1c1c;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: Georgia, "Iowan Old Style", "Palatino Linotype", serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at top left, rgba(29, 107, 87, 0.12), transparent 25%),
+        radial-gradient(circle at bottom right, rgba(145, 92, 18, 0.16), transparent 28%),
+        linear-gradient(140deg, #f8f5ee 0%, var(--bg) 45%, #ebe3d3 100%);
+      display: grid;
+      place-items: center;
+      padding: 24px;
+    }
+    .layout {
+      width: min(1100px, 100%);
+      display: grid;
+      grid-template-columns: 1.2fr 0.8fr;
+      gap: 20px;
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      padding: 24px;
+      backdrop-filter: blur(10px);
+      box-shadow: 0 20px 80px rgba(42, 36, 28, 0.10);
+    }
+    h1, h2, p { margin-top: 0; }
+    h1 {
+      font-size: clamp(2rem, 4vw, 3.6rem);
+      line-height: 0.92;
+      margin-bottom: 14px;
+    }
+    .lede {
+      font-size: 1.05rem;
+      max-width: 48ch;
+      opacity: 0.82;
+    }
+    .stack { display: grid; gap: 16px; }
+    .row {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+    label {
+      display: grid;
+      gap: 6px;
+      font-size: 0.92rem;
+    }
+    input, button {
+      font: inherit;
+      border-radius: 14px;
+      border: 1px solid var(--line);
+      padding: 12px 14px;
+      background: rgba(255, 255, 255, 0.86);
+      color: var(--ink);
+    }
+    input[type="file"] {
+      padding: 10px;
+    }
+    button {
+      background: var(--accent);
+      color: white;
+      border: none;
+      cursor: pointer;
+      transition: transform 120ms ease, opacity 120ms ease;
+    }
+    button.secondary {
+      background: transparent;
+      border: 1px solid var(--line);
+      color: var(--ink);
+    }
+    button:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+    button:not(:disabled):hover {
+      transform: translateY(-1px);
+    }
+    .status {
+      border-radius: 18px;
+      background: rgba(255, 255, 255, 0.75);
+      border: 1px solid var(--line);
+      padding: 16px;
+      min-height: 140px;
+    }
+    .progress-wrap {
+      display: grid;
+      gap: 8px;
+      margin-top: 6px;
+    }
+    .progress-bar {
+      width: 100%;
+      height: 12px;
+      border-radius: 999px;
+      background: rgba(31, 42, 36, 0.10);
+      overflow: hidden;
+    }
+    .progress-fill {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, #1d6b57 0%, #56a48e 100%);
+      transition: width 160ms ease;
+    }
+    .status-line {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 8px 0;
+      border-bottom: 1px dashed var(--line);
+      font-size: 0.94rem;
+    }
+    .status-line:last-child { border-bottom: none; }
+    .log {
+      background: #1d211e;
+      color: #e9efe8;
+      border-radius: 18px;
+      padding: 16px;
+      height: min(60vh, 540px);
+      min-height: 320px;
+      max-height: min(60vh, 540px);
+      overflow: auto;
+      font-family: "SFMono-Regular", ui-monospace, monospace;
+      font-size: 0.85rem;
+      line-height: 1.5;
+      white-space: pre-wrap;
+    }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      border-radius: 999px;
+      padding: 8px 12px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 0.9rem;
+      margin-bottom: 16px;
+    }
+    .viewer-link {
+      color: var(--accent);
+      font-weight: 600;
+      word-break: break-all;
+    }
+    .warn { color: var(--warn); }
+    .error { color: var(--error); }
+    @media (max-width: 900px) {
+      .layout { grid-template-columns: 1fr; }
+      .row { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <section class="panel stack">
+      <div class="pill">Choose server-side MP4 or browser-owned video -> backend streams frames through the live SLAM viewer</div>
+      <div>
+        <h1>LingBot-Map<br>E2E I/O Streaming</h1>
+        <p class="lede">
+          Use the server-file path for the most stable fallback, or let the browser own a local video file and stream frames directly to the backend over WebSocket.
+        </p>
+      </div>
+
+      <label>
+        Input Mode
+        <select id="inputMode">
+          <option value="browser_stream">Browser-Owned Video</option>
+          <option value="server_file">e2e_io_streaming/videos MP4</option>
+        </select>
+      </label>
+
+      <label>
+        Server Video
+        <select id="videoSelect">
+          <option value="">Loading available videos...</option>
+        </select>
+      </label>
+
+      <label>
+        Or Type Root Filename
+        <input id="videoName" type="text" placeholder="TestFootage - Trim (pt2).mp4">
+      </label>
+
+      <label>
+        Browser Video File
+        <input id="browserVideo" type="file" accept="video/*">
+      </label>
+
+      <div class="row">
+        <label>
+          Sample FPS
+          <input id="sampleFps" type="number" min="1" max="30" step="1" value="8">
+        </label>
+        <label>
+          Scale Frames
+          <input id="scaleFrames" type="number" min="1" max="32" step="1" value="8">
+        </label>
+      </div>
+
+      <div class="row">
+        <label>
+          Session Name
+          <input id="sessionName" type="text" value="browser-upload">
+        </label>
+        <div></div>
+      </div>
+
+      <div class="row">
+        <button id="startBtn">Start</button>
+        <button id="resetBtn" class="secondary">Reset Session</button>
+      </div>
+
+      <div class="status stack">
+        <div class="status-line"><span>Connection</span><strong id="connectionState">Disconnected</strong></div>
+        <div class="status-line"><span>Phase</span><strong id="phaseState">Idle</strong></div>
+        <div class="status-line"><span>Frame Progress</span><strong id="frameState">0 / 0</strong></div>
+        <div class="status-line"><span>Viewer</span><a id="viewerLink" class="viewer-link" target="_blank" rel="noreferrer">Open Viewer</a></div>
+        <div class="status-line"><span>Model FPS</span><strong id="modelFpsState">0.0</strong></div>
+        <div class="status-line"><span>Stream FPS</span><strong id="streamFpsState">0.0</strong></div>
+        <div class="status-line"><span>Avg Inference</span><strong id="avgInferenceState">0 ms</strong></div>
+        <div class="status-line"><span>Last Inference</span><strong id="lastInferenceState">0 ms</strong></div>
+        <div class="progress-wrap">
+          <div class="status-line"><span>Progress</span><strong id="progressLabel">0%</strong></div>
+          <div class="progress-bar"><div id="progressFill" class="progress-fill"></div></div>
+        </div>
+      </div>
+    </section>
+
+    <aside class="panel stack">
+      <div>
+        <h2>Session Log</h2>
+        <p>The browser can either trigger a file from <code>e2e_io_streaming/videos</code> or own a local video and stream frames directly over WebSocket.</p>
+      </div>
+      <div id="log" class="log"></div>
+    </aside>
+  </div>
+
+  <script>
+    const logEl = document.getElementById("log");
+    const connectionStateEl = document.getElementById("connectionState");
+    const phaseStateEl = document.getElementById("phaseState");
+    const frameStateEl = document.getElementById("frameState");
+    const viewerLinkEl = document.getElementById("viewerLink");
+    const modelFpsStateEl = document.getElementById("modelFpsState");
+    const streamFpsStateEl = document.getElementById("streamFpsState");
+    const avgInferenceStateEl = document.getElementById("avgInferenceState");
+    const lastInferenceStateEl = document.getElementById("lastInferenceState");
+    const progressLabelEl = document.getElementById("progressLabel");
+    const progressFillEl = document.getElementById("progressFill");
+    const inputModeEl = document.getElementById("inputMode");
+    const videoSelectEl = document.getElementById("videoSelect");
+    const videoNameEl = document.getElementById("videoName");
+    const browserVideoEl = document.getElementById("browserVideo");
+    const sampleFpsEl = document.getElementById("sampleFps");
+    const scaleFramesEl = document.getElementById("scaleFrames");
+    const sessionNameEl = document.getElementById("sessionName");
+    const startBtn = document.getElementById("startBtn");
+    const resetBtn = document.getElementById("resetBtn");
+
+    let isStreaming = false;
+    let statusPollTimer = null;
+
+    function updateModeVisibility() {
+      const browserMode = inputModeEl.value === "browser_stream";
+      videoSelectEl.disabled = browserMode;
+      videoNameEl.disabled = browserMode;
+      browserVideoEl.disabled = !browserMode;
+      startBtn.textContent = browserMode ? "Start Browser Stream" : "Start Server File";
+    }
+
+    function log(message, className = "") {
+      const line = document.createElement("div");
+      if (className) line.className = className;
+      line.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+      logEl.appendChild(line);
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function setPhase(value) {
+      phaseStateEl.textContent = value;
+    }
+
+    function setConnection(value) {
+      connectionStateEl.textContent = value;
+    }
+
+    function setViewer(url) {
+      if (!url) {
+        viewerLinkEl.textContent = "Open Viewer";
+        viewerLinkEl.removeAttribute("href");
+        return;
+      }
+      viewerLinkEl.textContent = "Open Viewer";
+      viewerLinkEl.href = url;
+    }
+
+    function viewerHref() {
+      return `${window.location.protocol}//${window.location.hostname}:8080`;
+    }
+
+    function setMetrics({ modelFps = 0, streamFps = 0, avgInferenceMs = 0, lastInferenceMs = 0 } = {}) {
+      modelFpsStateEl.textContent = Number(modelFps || 0).toFixed(1);
+      streamFpsStateEl.textContent = Number(streamFps || 0).toFixed(1);
+      avgInferenceStateEl.textContent = `${Math.round(Number(avgInferenceMs || 0))} ms`;
+      lastInferenceStateEl.textContent = `${Math.round(Number(lastInferenceMs || 0))} ms`;
+    }
+
+    function setProgress(percent) {
+      const clamped = Math.max(0, Math.min(100, Number(percent) || 0));
+      progressLabelEl.textContent = `${Math.round(clamped)}%`;
+      progressFillEl.style.width = `${clamped}%`;
+    }
+
+    function selectedVideoName() {
+      return videoNameEl.value.trim() || videoSelectEl.value.trim();
+    }
+
+    function websocketUrl() {
+      const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+      return `${protocol}://${window.location.host}/ws`;
+    }
+
+    async function pollStatusOnce() {
+      const response = await fetch("/status");
+      const data = await response.json();
+      if (data.progress) {
+        const phase = data.progress.phase || "Idle";
+        const message = data.progress.message || "";
+        setPhase(message ? `${phase}: ${message}` : phase);
+        setProgress(data.progress.percent || 0);
+        const processed = Number(data.progress.processed_frames || 0);
+        const total = Number(data.progress.total_frames || 0);
+        const sampled = Number(data.progress.sampled_frames || 0);
+        setMetrics({
+          modelFps: data.progress.model_fps,
+          streamFps: data.progress.stream_fps,
+          avgInferenceMs: data.progress.avg_inference_ms,
+          lastInferenceMs: data.progress.last_inference_ms,
+        });
+        if (total > 0) {
+          frameStateEl.textContent = `${processed} / ${total}`;
+        } else if (sampled > 0) {
+          frameStateEl.textContent = `${sampled} sampled`;
+        } else {
+          frameStateEl.textContent = "0 / 0";
+        }
+      }
+      return data;
+    }
+
+    function startStatusPolling() {
+      stopStatusPolling();
+      statusPollTimer = setInterval(async () => {
+        try {
+          await pollStatusOnce();
+        } catch (_) {
+        }
+      }, 800);
+    }
+
+    function stopStatusPolling() {
+      if (statusPollTimer) {
+        clearInterval(statusPollTimer);
+        statusPollTimer = null;
+      }
+    }
+
+    function xhrRunFile(form) {
+      return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", "/run-file");
+        xhr.responseType = "json";
+        setConnection("Processing");
+        setPhase("Requesting backend run");
+        setProgress(1);
+        log("Trigger sent. Waiting for backend processing.");
+        startStatusPolling();
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            resolve(xhr.response);
+          } else {
+            reject(new Error(xhr.response?.detail || xhr.response?.message || `Upload failed (${xhr.status})`));
+          }
+        };
+        xhr.onerror = () => reject(new Error("Upload failed"));
+        xhr.send(form);
+      });
+    }
+
+    function waitForWsOpen(ws) {
+      return new Promise((resolve, reject) => {
+        ws.onopen = () => resolve();
+        ws.onerror = () => reject(new Error("WebSocket connection failed"));
+      });
+    }
+
+    function waitForWsMessage(ws) {
+      return new Promise((resolve, reject) => {
+        ws.onmessage = (event) => {
+          try {
+            const payload = JSON.parse(event.data);
+            if (payload.type === "error") {
+              reject(new Error(payload.message || "WebSocket error"));
+              return;
+            }
+            resolve(payload);
+          } catch (error) {
+            reject(error);
+          }
+        };
+        ws.onerror = () => reject(new Error("WebSocket transport error"));
+        ws.onclose = () => reject(new Error("WebSocket closed unexpectedly"));
+      });
+    }
+
+    function canvasToBlob(canvas) {
+      return new Promise((resolve, reject) => {
+        canvas.toBlob((blob) => {
+          if (!blob) {
+            reject(new Error("Failed to encode browser frame"));
+            return;
+          }
+          resolve(blob);
+        }, "image/png");
+      });
+    }
+
+    async function prepareVideoElement(file) {
+      const url = URL.createObjectURL(file);
+      const video = document.createElement("video");
+      video.src = url;
+      video.muted = true;
+      video.playsInline = true;
+      video.preload = "auto";
+      await new Promise((resolve, reject) => {
+        video.onloadedmetadata = () => resolve();
+        video.onerror = () => reject(new Error("Failed to load browser video"));
+      });
+      return { video, url };
+    }
+
+    async function waitForCaptureTime(video, targetTime) {
+      return new Promise((resolve, reject) => {
+        let settled = false;
+
+        const cleanup = () => {
+          video.removeEventListener("ended", onEnded);
+        };
+
+        const onEnded = () => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          resolve(null);
+        };
+
+        const onFrame = (_now, metadata) => {
+          if (settled) return;
+          if (metadata.mediaTime + 1e-3 >= targetTime) {
+            video.pause();
+            settled = true;
+            cleanup();
+            resolve(metadata.mediaTime);
+            return;
+          }
+          video.requestVideoFrameCallback(onFrame);
+        };
+
+        video.addEventListener("ended", onEnded, { once: true });
+        video.requestVideoFrameCallback(onFrame);
+        video.play().catch((error) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          reject(error);
+        });
+      });
+    }
+
+    async function streamBrowserVideo() {
+      const file = browserVideoEl.files?.[0];
+      if (!file) {
+        log("Choose a browser video file first.", "warn");
+        return;
+      }
+
+      const sampleFps = Math.max(1, Number(sampleFpsEl.value) || 8);
+      const scaleFrames = Math.max(1, Number(scaleFramesEl.value) || 8);
+      const sessionName = sessionNameEl.value.trim() || file.name;
+      const { video, url } = await prepareVideoElement(file);
+      const totalFrames = Math.max(1, Math.ceil((video.duration || 0) * sampleFps));
+      const canvas = document.createElement("canvas");
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      const ctx = canvas.getContext("2d", { alpha: false });
+      if (!ctx) {
+        URL.revokeObjectURL(url);
+        throw new Error("Failed to create browser frame canvas");
+      }
+
+      const ws = new WebSocket(websocketUrl());
+      await waitForWsOpen(ws);
+      ws.send(JSON.stringify({
+        type: "start_stream",
+        session_name: sessionName,
+        sample_fps: sampleFps,
+        scale_frames: scaleFrames,
+        total_frames: totalFrames,
+      }));
+      const started = await waitForWsMessage(ws);
+      setConnection("Streaming");
+      setViewer(viewerHref());
+      log(`Browser stream started for ${file.name}`);
+
+      let targetTime = 0;
+      const step = 1 / sampleFps;
+      video.playbackRate = 8.0;
+
+      while (true) {
+        const mediaTime = await waitForCaptureTime(video, targetTime);
+        if (mediaTime === null) {
+          break;
+        }
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const blob = await canvasToBlob(canvas);
+        ws.send(await blob.arrayBuffer());
+        const ack = await waitForWsMessage(ws);
+        const processed = Number(ack.processed_frames || 0);
+        const total = Number(ack.total_frames || totalFrames);
+        frameStateEl.textContent = `${processed} / ${total}`;
+        if (typeof ack.percent === "number") {
+          setProgress(ack.percent);
+        }
+        setMetrics({
+          modelFps: ack.model_fps,
+          streamFps: ack.stream_fps,
+          avgInferenceMs: ack.avg_inference_ms,
+          lastInferenceMs: ack.last_inference_ms,
+        });
+        setPhase(ack.type === "buffering" ? "buffering: waiting for scale frames" : "browser_stream: live browser frame processing");
+        targetTime = Math.max(targetTime + step, mediaTime + step);
+      }
+
+      ws.send(JSON.stringify({ type: "end_stream" }));
+      const done = await waitForWsMessage(ws);
+      ws.close();
+      URL.revokeObjectURL(url);
+      setConnection("Connected");
+      setPhase("Done");
+      setProgress(100);
+      setMetrics({
+        modelFps: done.model_fps,
+        streamFps: done.stream_fps,
+        avgInferenceMs: done.avg_inference_ms,
+        lastInferenceMs: done.last_inference_ms,
+      });
+      frameStateEl.textContent = `${done.processed_frames || totalFrames} / ${done.total_frames || totalFrames}`;
+      setViewer(viewerHref());
+      if (done.pose?.position) {
+        const pose = done.pose.position.map((v) => Number(v).toFixed(3)).join(", ");
+        log(`Browser stream done. Final pose=[${pose}] total_points=${done.total_points}`);
+      } else {
+        log(`Browser stream done. Processed ${done.processed_frames || totalFrames} frames.`);
+      }
+    }
+
+    async function startStreaming() {
+      if (isStreaming) {
+        log("A stream is already running.", "warn");
+        return;
+      }
+
+      startBtn.disabled = true;
+      isStreaming = true;
+      frameStateEl.textContent = "0 / 0";
+      setPhase("Preparing");
+
+      try {
+        setConnection("Queued");
+        setPhase("Queued");
+        setProgress(0);
+        setViewer(viewerHref());
+        log(`Viewer available during processing.`);
+
+        if (inputModeEl.value === "browser_stream") {
+          log(`Starting browser-owned frame streaming`);
+          await streamBrowserVideo();
+        } else {
+          const filename = selectedVideoName();
+          if (!filename) {
+            log("Choose or type a video from e2e_io_streaming/videos first.", "warn");
+            return;
+          }
+          const sampleFps = Math.max(1, Number(sampleFpsEl.value) || 8);
+          const scaleFrames = Math.max(1, Number(scaleFramesEl.value) || 8);
+          const form = new FormData();
+          form.append("filename", filename);
+          form.append("sample_fps", String(sampleFps));
+          form.append("scale_frames", String(scaleFrames));
+
+          log(`Requesting backend run for ${filename}`);
+          const data = await xhrRunFile(form);
+
+          setConnection("Connected");
+          setPhase("Done");
+          setProgress(100);
+          setViewer(viewerHref());
+          frameStateEl.textContent = `${data.sampled_frames} / ${data.sampled_frames}`;
+          const pose = data.pose.position.map((v) => v.toFixed(3)).join(", ");
+          log(`Processed ${data.sampled_frames} frames on backend using ${data.mode || "streaming"}.`);
+          log(`Final pose=[${pose}] total_points=${data.total_points}`);
+          log(`Viewer: ${viewerLinkEl.textContent}`);
+        }
+      } catch (error) {
+        setConnection("Disconnected");
+        setPhase("Error");
+        log(error.message || String(error), "error");
+      } finally {
+        stopStatusPolling();
+        isStreaming = false;
+        startBtn.disabled = false;
+      }
+    }
+
+    async function resetSession() {
+      try {
+        await fetch("/reset", { method: "POST" });
+        setPhase("Idle");
+        setProgress(0);
+        setMetrics({});
+        frameStateEl.textContent = "0 / 0";
+        setViewer("");
+        log("Session reset.");
+      } catch (error) {
+        log(`Reset failed: ${error.message || error}`, "error");
+      }
+    }
+
+    async function loadVideoChoices() {
+      try {
+        const response = await fetch("/videos");
+        const data = await response.json();
+        const videos = data.videos || [];
+        videoSelectEl.innerHTML = "";
+        if (videos.length === 0) {
+          const option = document.createElement("option");
+          option.value = "";
+          option.textContent = "No MP4 files found in e2e_io_streaming/videos";
+          videoSelectEl.appendChild(option);
+          return;
+        }
+        const placeholder = document.createElement("option");
+        placeholder.value = "";
+        placeholder.textContent = "Choose a video from e2e_io_streaming/videos";
+        videoSelectEl.appendChild(placeholder);
+        for (const name of videos) {
+          const option = document.createElement("option");
+          option.value = name;
+          option.textContent = name;
+          videoSelectEl.appendChild(option);
+        }
+      } catch (error) {
+        log(`Failed to load e2e_io_streaming/videos: ${error.message || error}`, "error");
+        videoSelectEl.innerHTML = '<option value="">Failed to load e2e_io_streaming/videos</option>';
+      }
+    }
+
+    startBtn.addEventListener("click", startStreaming);
+    resetBtn.addEventListener("click", resetSession);
+    inputModeEl.addEventListener("change", updateModeVisibility);
+    videoSelectEl.addEventListener("change", () => {
+      if (videoSelectEl.value) {
+        videoNameEl.value = "";
+      }
+    });
+    setConnection("Ready");
+    setPhase("Idle");
+    setProgress(0);
+    setMetrics({});
+    updateModeVisibility();
+    pollStatusOnce().catch(() => {});
+    loadVideoChoices().catch(() => {});
+  </script>
+</body>
+</html>
