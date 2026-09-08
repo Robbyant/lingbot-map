@@ -23,6 +23,7 @@ import numpy as np
 import torch
 import cv2
 import matplotlib.cm as cm
+import matplotlib
 from tqdm.auto import tqdm
 
 import viser
@@ -542,6 +543,7 @@ class PointCloudViewer:
 
         self.pc_handles = []
         self.cam_handles = []
+        self.cam_frame_handles = []
 
         @self.psize_slider.on_update
         def _(_) -> None:
@@ -617,9 +619,16 @@ class PointCloudViewer:
         for handle in self.cam_handles:
             try:
                 handle.remove()
-            except (KeyError, AttributeError):
+            except (KeyError, AttributeError, RuntimeError):
                 pass
         self.cam_handles.clear()
+
+        for handle in self.cam_frame_handles:
+            try:
+                handle.remove()
+            except (KeyError, AttributeError, RuntimeError):
+                pass
+        self.cam_frame_handles.clear()
 
         if self.show_camera:
             downsample_factor = int(self.camera_downsample_slider.value)
@@ -1051,7 +1060,7 @@ class PointCloudViewer:
             normalized_indices = np.array(list(range(num_cameras))) / (num_cameras - 1)
         else:
             normalized_indices = np.array([0.0])
-        cmap = cm.get_cmap('viridis')
+        cmap = matplotlib.colormaps['viridis']
         self.camera_colors = cmap(normalized_indices)
         return pcs, step_list
 
@@ -1140,7 +1149,7 @@ class PointCloudViewer:
         camera_color = self.camera_colors[step_index]
         camera_color_rgb = tuple((camera_color[:3] * 255).astype(int))
 
-        self.server.scene.add_frame(
+        camera_frame_handle = self.server.scene.add_frame(
             f"/frames/{step}/camera_frame",
             wxyz=q,
             position=t,
@@ -1148,6 +1157,7 @@ class PointCloudViewer:
             axes_radius=0.002,
             origin_radius=0.002,
         )
+        self.cam_frame_handles.append(camera_frame_handle)
 
         frustum_handle = self.server.scene.add_camera_frustum(
             name=f"/frames/{step}/camera",
