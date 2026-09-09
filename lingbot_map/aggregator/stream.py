@@ -88,9 +88,26 @@ class AggregatorStream(AggregatorBase):
         kwargs.pop('use_flexflash', None)
         use_sdpa = kwargs.pop('use_sdpa', False)
 
-        # Backend selection: SDPA (no extra deps) or FlashInfer (paged KV cache)
-        self.use_sdpa = use_sdpa
-        self.use_flashinfer = not use_sdpa  # FlashInfer is default unless SDPA requested
+        # Backend selection: SDPA (portable) or FlashInfer (optional CUDA).
+        # Soft-fallback when FlashInfer was requested but is not importable — avoid
+        # crashing at first forward / FlashInferBlock construction.
+        if use_sdpa or not use_flashinfer:
+            self.use_sdpa = True
+            self.use_flashinfer = False
+        else:
+            from lingbot_map.utils.device import flashinfer_usable
+
+            usable, reason = flashinfer_usable()
+            if usable:
+                self.use_sdpa = False
+                self.use_flashinfer = True
+            else:
+                logger.warning(
+                    "FlashInfer not usable (%s); falling back to SDPA backend.",
+                    reason,
+                )
+                self.use_sdpa = True
+                self.use_flashinfer = False
 
         # Call parent __init__
         super().__init__(**kwargs)

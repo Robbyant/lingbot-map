@@ -89,7 +89,10 @@ class FlashInferKVCacheManager:
         fa3: bool = False,
     ):
         if not FLASHINFER_AVAILABLE:
-            raise RuntimeError("FlashInfer is not available. Please install flashinfer.")
+            raise RuntimeError(
+                "FlashInfer is not available. Install flashinfer-python for the "
+                "CUDA fast path, or use the SDPA backend (--use_sdpa / use_sdpa=True)."
+            )
 
         self.num_blocks = num_blocks
         self.num_special_tokens = num_special_tokens         # 6

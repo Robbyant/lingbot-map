@@ -281,7 +281,10 @@ def write_rows(path: Path, rows: Iterable[dict]) -> None:
 def main() -> None:
     args = parse_args()
     if not torch.cuda.is_available():
-        raise RuntimeError("CUDA is required")
+        raise RuntimeError(
+            "CUDA is required for benchmark_gct_memory.py. "
+            "For portable inference use `python demo.py --device cpu` (SDPA)."
+        )
 
     device = args.device
     dtype = resolve_dtype(device, args.dtype)

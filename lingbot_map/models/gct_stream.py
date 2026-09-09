@@ -144,7 +144,7 @@ class GCTStream(GCTBase):
         kv_cache_include_scale_frames: bool = True,
         kv_cache_camera_only: bool = False,
         # Backend selection
-        use_sdpa: bool = False,  # If True, use SDPA (no flashinfer needed); default: FlashInfer
+        use_sdpa: bool = False,  # True = SDPA; False = try FlashInfer (soft-falls back to SDPA)
         # Gradient checkpointing
         use_gradient_checkpoint: bool = True,
         # Camera head iterative refinement (lower = faster inference; default 4)
