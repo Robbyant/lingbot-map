@@ -47,6 +47,10 @@ class AggregatorStream(AggregatorBase):
         kv_cache_cross_frame_special: bool = True,
         kv_cache_include_scale_frames: bool = True,
         kv_cache_camera_only: bool = False,
+        # TTT trajectory-memory (SDPA backend only, see _build_blocks)
+        use_ttt_memory: bool = False,
+        ttt_hidden_dim: int = None,
+        ttt_inner_lr: float = 1.0,
         # Base class parameters via **kwargs
         **kwargs
     ):
@@ -81,6 +85,9 @@ class AggregatorStream(AggregatorBase):
         self.kv_cache_cross_frame_special = kv_cache_cross_frame_special
         self.kv_cache_include_scale_frames = kv_cache_include_scale_frames
         self.kv_cache_camera_only = kv_cache_camera_only
+        self.use_ttt_memory = use_ttt_memory
+        self.ttt_hidden_dim = ttt_hidden_dim
+        self.ttt_inner_lr = ttt_inner_lr
 
         # Pop kwargs that are passed but not needed by base class
         kwargs.pop('enable_stream_inference', None)
@@ -135,16 +142,26 @@ class AggregatorStream(AggregatorBase):
 
         # Global blocks: FlashInferBlock (default) or SDPABlock (fallback)
         GlobalBlockCls = SDPABlock if self.use_sdpa else FlashInferBlock
-        self.global_blocks = nn.ModuleList([
-            GlobalBlockCls(
-                **block_params,
-                rope=self.rope if not self.disable_global_rope else None,
-                kv_cache_sliding_window=self.kv_cache_sliding_window,
-                kv_cache_scale_frames=self.kv_cache_scale_frames,
-                kv_cache_cross_frame_special=self.kv_cache_cross_frame_special,
-                kv_cache_include_scale_frames=self.kv_cache_include_scale_frames,
-                kv_cache_camera_only=self.kv_cache_camera_only,
+        global_block_kwargs = dict(
+            **block_params,
+            rope=self.rope if not self.disable_global_rope else None,
+            kv_cache_sliding_window=self.kv_cache_sliding_window,
+            kv_cache_scale_frames=self.kv_cache_scale_frames,
+            kv_cache_cross_frame_special=self.kv_cache_cross_frame_special,
+            kv_cache_include_scale_frames=self.kv_cache_include_scale_frames,
+            kv_cache_camera_only=self.kv_cache_camera_only,
+        )
+        if self.use_sdpa:
+            # TTT trajectory-memory is currently only wired up for the SDPA
+            # backend (FlashInferBlock/FlashInferAttention would need the
+            # equivalent change in flashinfer_cache.py to support it).
+            global_block_kwargs.update(
+                use_ttt_memory=self.use_ttt_memory,
+                ttt_hidden_dim=self.ttt_hidden_dim,
+                ttt_inner_lr=self.ttt_inner_lr,
             )
+        self.global_blocks = nn.ModuleList([
+            GlobalBlockCls(**global_block_kwargs)
             for _ in range(depth)
         ])
 
@@ -243,6 +260,10 @@ class AggregatorStream(AggregatorBase):
                     self.kv_cache[key] = False
                 else:
                     self.kv_cache[key] = None
+        for blk in getattr(self, "global_blocks", []):
+            ttt = getattr(blk.attn, "ttt_memory", None)
+            if ttt is not None:
+                ttt.reset_state()
         self.total_frames_processed = 0
         self._cached_pos3d = None
         logger.info("KV cache cleaned")

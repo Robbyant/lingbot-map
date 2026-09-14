@@ -17,3 +17,7 @@ weights/
 **/.DS_Store
 docs/
 
+example
+benchmark/data/
+
+checkpoints/

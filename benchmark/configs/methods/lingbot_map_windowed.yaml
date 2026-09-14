@@ -1,0 +1,25 @@
+model: lingbot_map
+env: lingbot-map
+_checkpoint: /home/ec2-user/SageMaker/sam3/output/lingbot-map/checkpoints/lingbot-map.pt
+_device: cuda
+_mode: windowed        # process in overlapping chunks so long sequences don't OOM,
+                        # instead of holding growing state for the whole sequence at once
+_use_amp: true
+_use_sdpa: false  # Force FlashInfer backend (paged KV cache attention)
+_image_size: 518
+_patch_size: 14
+_enable_3d_rope: true
+_num_scale_frames: 8
+_max_frame_num: 1024
+_kv_cache_sliding_window: 64
+_kv_cache_scale_frames: 8
+_window_size: 64       # frames per chunk (matches demo.py's windowed default)
+_overlap_size: 16      # overlap (actual frames) between consecutive windows, used to stitch them into one trajectory
+# NOTE: unlike streaming mode, the benchmark's LingbotMapMethod._run_inference()
+# passes keyframe_interval straight into inference_windowed() without resolving
+# "auto" to an int first -- "auto" crashes windowed mode (TypeError comparing
+# int > str). demo.py's own windowed default is a fixed 1, so use that here.
+_keyframe_interval: 1
+_auto_keyframe_threshold: 320
+_area_budget: 255000
+_align: 14

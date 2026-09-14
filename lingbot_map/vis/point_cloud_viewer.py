@@ -99,6 +99,7 @@ class PointCloudViewer:
         self.size = size
         self.state_args = state_args
         self.server = viser.ViserServer(host="0.0.0.0", port=port)
+        self._print_sagemaker_proxy_url(port)
         self.server.gui.configure_theme(titlebar_content=None, control_layout="collapsible")
         self.device = device
         self.conf_list = conf_list
@@ -133,6 +134,24 @@ class PointCloudViewer:
 
         self._setup_gui()
         self.server.on_client_connect(self._connect_client)
+
+    @staticmethod
+    def _print_sagemaker_proxy_url(port: int) -> None:
+        """If running on a SageMaker notebook instance, print the browser URL for the viser server."""
+        try:
+            import json
+
+            with open("/opt/ml/metadata/resource-metadata.json") as f:
+                arn = json.load(f)["ResourceArn"]
+            # arn:aws:sagemaker:<region>:<account>:notebook-instance/<name>
+            _, _, _, region, _, resource = arn.split(":", 5)
+            name = resource.split("/", 1)[1]
+            print(
+                f"SageMaker notebook instance detected. Open the viewer at:\n"
+                f"  https://{name}.notebook.{region}.sagemaker.aws/proxy/{port}/"
+            )
+        except Exception:
+            pass
 
     def _process_pred_dict(
         self,
@@ -1292,7 +1311,8 @@ class PointCloudViewer:
         output_path: str = "output_pointcloud.mp4",
         fps: int = 30,
         resolution: str = "1920x1080",
-        save_original_video: bool = True
+        save_original_video: bool = True,
+        client_timeout: float = 10.0,
     ):
         """Save point cloud animation as video."""
         try:
@@ -1305,7 +1325,7 @@ class PointCloudViewer:
             print(f"Temporary directory: {temp_dir}")
 
             print("Waiting for client connection...")
-            timeout = 10
+            timeout = client_timeout
             start_time = time.time()
             while len(self.server.get_clients()) == 0:
                 time.sleep(0.1)
@@ -1324,7 +1344,7 @@ class PointCloudViewer:
                 time.sleep(0.1)
 
                 try:
-                    screenshot = client.camera.get_render(height=height, width=width)
+                    screenshot = client.camera.get_render(height=height, width=width, timeout=15.0)
                     if screenshot is not None:
                         frame = np.array(screenshot)
                         if frame.shape[2] == 4:

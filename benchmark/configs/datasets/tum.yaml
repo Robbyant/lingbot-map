@@ -1,5 +1,5 @@
 dataset: tum
-raw_data_root: /path/to/TUM-RGBD
+raw_data_root: /home/ec2-user/SageMaker/sam3/output/lingbot-map/benchmark/data/TUM-RGBD
 _load_img_size: 518
 evaluation:
   depth:

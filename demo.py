@@ -151,8 +151,12 @@ def load_model(args, device):
 
     if args.model_path:
         print(f"Loading checkpoint: {args.model_path}")
-        ckpt = torch.load(args.model_path, map_location=device, weights_only=False)
-        state_dict = ckpt.get("model", ckpt)
+        if args.model_path.endswith(".safetensors"):
+            from safetensors.torch import load_file
+            state_dict = load_file(args.model_path, device=str(device))
+        else:
+            ckpt = torch.load(args.model_path, map_location=device, weights_only=False)
+            state_dict = ckpt.get("model", ckpt)
         missing, unexpected = model.load_state_dict(state_dict, strict=False)
         if missing:
             print(f"  Missing keys: {len(missing)}")
@@ -419,6 +423,16 @@ def main():
                         help="Save sky mask visualizations (original | mask | overlay) to this directory")
     parser.add_argument("--export_preprocessed", type=str, default=None,
                         help="Export stride-sampled, resized/cropped images to this folder")
+    parser.add_argument("--save_video", type=str, default=None,
+                        help="Automatically render and save the point-cloud animation to this "
+                             "mp4 path once a browser client connects (no need to click 'Save "
+                             "Video' in the GUI). The viewer keeps running afterwards.")
+    parser.add_argument("--video_fps", type=int, default=30)
+    parser.add_argument("--video_resolution", type=str, default="1920x1080")
+    parser.add_argument("--save_original_video", action=argparse.BooleanOptionalAction, default=True,
+                        help="Alongside the point-cloud video, also save the original RGB frames as a video")
+    parser.add_argument("--video_client_timeout", type=float, default=120.0,
+                        help="Seconds to wait for a browser client to connect before giving up on --save_video")
 
     args = parser.parse_args()
     assert args.image_folder or args.video_path, \
@@ -601,6 +615,26 @@ def main():
             sky_mask_dir=args.sky_mask_dir,
             sky_mask_visualization_dir=args.sky_mask_visualization_dir,
         )
+
+        if args.save_video:
+            import threading
+
+            def _auto_save_video():
+                print(f"[save_video] Waiting up to {args.video_client_timeout:.0f}s for a browser "
+                      f"client to connect (open the viewer URL above)...")
+                try:
+                    viewer.save_video(
+                        output_path=args.save_video,
+                        fps=args.video_fps,
+                        resolution=args.video_resolution,
+                        save_original_video=args.save_original_video,
+                        client_timeout=args.video_client_timeout,
+                    )
+                except Exception as e:
+                    print(f"[save_video] Failed: {e}")
+
+            threading.Thread(target=_auto_save_video, daemon=True).start()
+
         viewer.run()
     except ImportError:
         print("viser not installed. Install with: pip install lingbot-map[vis]")

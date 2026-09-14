@@ -143,6 +143,10 @@ class GCTStream(GCTBase):
         kv_cache_cross_frame_special: bool = True,
         kv_cache_include_scale_frames: bool = True,
         kv_cache_camera_only: bool = False,
+        # TTT trajectory-memory (SDPA backend only -- requires use_sdpa=True)
+        use_ttt_memory: bool = False,
+        ttt_hidden_dim: int = None,
+        ttt_inner_lr: float = 1.0,
         # Backend selection
         use_sdpa: bool = False,  # If True, use SDPA (no flashinfer needed); default: FlashInfer
         # Gradient checkpointing
@@ -196,6 +200,9 @@ class GCTStream(GCTBase):
         self.kv_cache_cross_frame_special = kv_cache_cross_frame_special
         self.kv_cache_include_scale_frames = kv_cache_include_scale_frames
         self.kv_cache_camera_only = kv_cache_camera_only
+        self.use_ttt_memory = use_ttt_memory
+        self.ttt_hidden_dim = ttt_hidden_dim
+        self.ttt_inner_lr = ttt_inner_lr
         self.use_sdpa = use_sdpa
         self.camera_num_iterations = camera_num_iterations
 
@@ -247,6 +254,9 @@ class GCTStream(GCTBase):
             kv_cache_cross_frame_special=self.kv_cache_cross_frame_special,
             kv_cache_include_scale_frames=self.kv_cache_include_scale_frames,
             kv_cache_camera_only=self.kv_cache_camera_only,
+            use_ttt_memory=self.use_ttt_memory,
+            ttt_hidden_dim=self.ttt_hidden_dim,
+            ttt_inner_lr=self.ttt_inner_lr,
             use_gradient_checkpoint=self.use_gradient_checkpoint,
         )
 

@@ -580,6 +580,10 @@ class SDPAAttention(Attention):
         kv_cache_cross_frame_special: bool = True,
         kv_cache_include_scale_frames: bool = True,
         kv_cache_camera_only: bool = False,
+        # TTT trajectory-memory (replaces the special-token stream when enabled)
+        use_ttt_memory: bool = False,
+        ttt_hidden_dim: Optional[int] = None,
+        ttt_inner_lr: float = 1.0,
     ) -> None:
         super().__init__(
             dim=dim, num_heads=num_heads, qkv_bias=qkv_bias, proj_bias=proj_bias,
@@ -591,6 +595,12 @@ class SDPAAttention(Attention):
         self.kv_cache_cross_frame_special = kv_cache_cross_frame_special
         self.kv_cache_include_scale_frames = kv_cache_include_scale_frames
         self.kv_cache_camera_only = kv_cache_camera_only
+
+        if use_ttt_memory:
+            from lingbot_map.layers.ttt_memory import TTTMemory
+            self.ttt_memory = TTTMemory(dim=dim, hidden_dim=ttt_hidden_dim, inner_lr=ttt_inner_lr)
+        else:
+            self.ttt_memory = None
 
     def forward(self, x: Tensor, pos=None,
                 num_patches=None, num_special=None, num_frames=None, enable_3d_rope=False,
@@ -666,12 +676,15 @@ class SDPAAttention(Attention):
             k_full = k_cached.reshape(a, b, c * d, e)
             v_full = v_cached.reshape(a, b, c * d, e)
 
-            if f"k_{global_idx}_special" in kv_cache and kv_cache[f"k_{global_idx}_special"] is not None:
-                special_k = kv_cache[f"k_{global_idx}_special"]
-                special_v = kv_cache[f"v_{global_idx}_special"]
-                sa, sb, sc, sd, se = special_k.shape
-                k_full = torch.cat([special_k.reshape(sa, sb, sc * sd, se), k_full], dim=2)
-                v_full = torch.cat([special_v.reshape(sa, sb, sc * sd, se), v_full], dim=2)
+            if self.ttt_memory is None:
+                # Legacy path: prepend evicted frames' special tokens (kept as a
+                # growing token list) into the attended-over K/V.
+                if f"k_{global_idx}_special" in kv_cache and kv_cache[f"k_{global_idx}_special"] is not None:
+                    special_k = kv_cache[f"k_{global_idx}_special"]
+                    special_v = kv_cache[f"v_{global_idx}_special"]
+                    sa, sb, sc, sd, se = special_k.shape
+                    k_full = torch.cat([special_k.reshape(sa, sb, sc * sd, se), k_full], dim=2)
+                    v_full = torch.cat([special_v.reshape(sa, sb, sc * sd, se), v_full], dim=2)
 
             q_seq_len = q.shape[2]
             x = F.scaled_dot_product_attention(
@@ -679,6 +692,13 @@ class SDPAAttention(Attention):
                 dropout_p=self.attn_drop.p if self.training else 0.0,
             )
             x = x.transpose(1, 2).reshape(B, q_seq_len, self.num_heads * self.head_dim)
+
+            if self.ttt_memory is not None:
+                # TTT path: evicted frames never entered k_full/v_full at all (see
+                # _apply_kv_cache_eviction below); their contribution instead comes
+                # from querying the fast-weight memory with the current queries.
+                q_merged = q.transpose(1, 2).reshape(B, q_seq_len, self.num_heads * self.head_dim)
+                x = x + self.ttt_memory.query(q_merged)
 
         x = self.proj(x)
         x = self.proj_drop(x)
@@ -698,7 +718,17 @@ class SDPAAttention(Attention):
                     evicted_k = kv_cache[f"k_{global_idx}"][:, :, evict_start:evict_end, :, :]
                     evicted_v = kv_cache[f"v_{global_idx}"][:, :, evict_start:evict_end, :, :]
 
-                    if self.kv_cache_cross_frame_special:
+                    if self.ttt_memory is not None:
+                        # TTT path: fold ALL evicted tokens (patches + specials) into
+                        # the fast-weight memory via a gradient step, instead of
+                        # hand-selecting a handful of special tokens to keep forever.
+                        B_, H_, n_evict, tpf, D_ = evicted_k.shape
+                        assert B_ == 1, "TTT memory currently assumes streaming batch size 1"
+                        # evicted_k[0]: [H, n_evict, tpf, D] -> [n_evict, tpf, H, D] -> [n_evict*tpf, H*D]
+                        k_full_dim = evicted_k[0].permute(1, 2, 0, 3).reshape(n_evict * tpf, H_ * D_)
+                        v_full_dim = evicted_v[0].permute(1, 2, 0, 3).reshape(n_evict * tpf, H_ * D_)
+                        self.ttt_memory.update(k_full_dim, v_full_dim)
+                    elif self.kv_cache_cross_frame_special:
                         if self.kv_cache_camera_only:
                             new_special_k = evicted_k[:, :, :, camera_token_idx:camera_token_idx+1, :].clone()
                             new_special_v = evicted_v[:, :, :, camera_token_idx:camera_token_idx+1, :].clone()

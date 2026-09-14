@@ -486,6 +486,9 @@ class SDPABlock(nn.Module):
         kv_cache_cross_frame_special: bool = True,
         kv_cache_include_scale_frames: bool = True,
         kv_cache_camera_only: bool = False,
+        use_ttt_memory: bool = False,
+        ttt_hidden_dim: int = None,
+        ttt_inner_lr: float = 1.0,
     ) -> None:
         super().__init__()
         self.norm1 = norm_layer(dim)
@@ -497,6 +500,9 @@ class SDPABlock(nn.Module):
             kv_cache_cross_frame_special=kv_cache_cross_frame_special,
             kv_cache_include_scale_frames=kv_cache_include_scale_frames,
             kv_cache_camera_only=kv_cache_camera_only,
+            use_ttt_memory=use_ttt_memory,
+            ttt_hidden_dim=ttt_hidden_dim,
+            ttt_inner_lr=ttt_inner_lr,
         )
         self.ls1 = LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
         self.drop_path1 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()

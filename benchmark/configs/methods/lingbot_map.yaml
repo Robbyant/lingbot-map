@@ -1,6 +1,6 @@
 model: lingbot_map
 env: lingbot-map
-_checkpoint: /path/to/lingbot-map.pt
+_checkpoint: /home/ec2-user/SageMaker/sam3/output/lingbot-map/checkpoints/lingbot-map.pt
 _device: cuda
 _mode: streaming
 _use_amp: true
