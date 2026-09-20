@@ -1,7 +1,4 @@
 """Inference-only nonpersistent BF16 parameter caches."""
-
-
-import os
 import types
 import weakref
 from dataclasses import dataclass
@@ -10,88 +7,10 @@ import torch
 import torch.nn.functional as F
 
 
-ENV_FLAG = "LINGBOT_THOR_CACHE_MLP"
-
-
-ENV_FLAG_001C = "LINGBOT_THOR_CACHE_MLP"
-
-
-ENV_FLAG_002A = "LINGBOT_THOR_CACHE_MLP"
-
-
-ENV_FLAG_002B1 = "LINGBOT_THOR_CACHE_QKV"
-
-
-ENV_FLAG_002B2 = "LINGBOT_THOR_CACHE_QKV"
-
-
-ENV_FLAG_002B3 = "LINGBOT_THOR_CACHE_QKV"
-
-
 @dataclass(frozen=True)
-class Candidate001BStats:
+class WeightCacheStats:
     blocks_patched: int
     buffers_registered: int
-
-
-@dataclass(frozen=True)
-class Candidate001CStats:
-    blocks_patched: int
-    buffers_registered: int
-
-
-@dataclass(frozen=True)
-class Candidate002AStats:
-    blocks_patched: int
-    buffers_registered: int
-
-
-@dataclass(frozen=True)
-class Candidate002B1Stats:
-    blocks_patched: int
-    buffers_registered: int
-
-
-@dataclass(frozen=True)
-class Candidate002B2Stats:
-    blocks_patched: int
-    buffers_registered: int
-
-
-@dataclass(frozen=True)
-class Candidate002B3Stats:
-    blocks_patched: int
-    buffers_registered: int
-
-
-def candidate001_weight_cast_hoist_enabled() -> bool:
-    value = os.environ.get(ENV_FLAG, "")
-    return value not in ("", "0", "false", "False", "FALSE", "no", "No", "NO")
-
-
-def candidate001c_frame_mlp_weight_cast_hoist_enabled() -> bool:
-    value = os.environ.get(ENV_FLAG_001C, "")
-    return value not in ("", "0", "false", "False", "FALSE", "no", "No", "NO")
-
-
-def candidate002a_patch_mlp_weight_cast_hoist_enabled() -> bool:
-    value = os.environ.get(ENV_FLAG_002A, "")
-    return value not in ("", "0", "false", "False", "FALSE", "no", "No", "NO")
-
-
-def candidate002b1_frame_qkv_weight_cast_hoist_enabled() -> bool:
-    value = os.environ.get(ENV_FLAG_002B1, "")
-    return value not in ("", "0", "false", "False", "FALSE", "no", "No", "NO")
-
-
-def candidate002b2_patch_qkv_weight_cast_hoist_enabled() -> bool:
-    value = os.environ.get(ENV_FLAG_002B2, "")
-    return value not in ("", "0", "false", "False", "FALSE", "no", "No", "NO")
-
-
-def candidate002b3_gca_qkv_weight_cast_hoist_enabled() -> bool:
-    value = os.environ.get(ENV_FLAG_002B3, "")
-    return value not in ("", "0", "false", "False", "FALSE", "no", "No", "NO")
 
 
 def _set_nonpersistent_buffer(module, name: str, value: torch.Tensor | None) -> bool:
@@ -360,7 +279,7 @@ def _iter_patch_embed_blocks(model):
     return flattened
 
 
-def apply_candidate001_weight_cast_hoist(model) -> Candidate001BStats:
+def apply_candidate001_weight_cast_hoist(model) -> WeightCacheStats:
     """Patch GCA global blocks for Candidate 001B.
 
     The original fp32 parameters remain untouched.  Shadow buffers are marked
@@ -369,7 +288,7 @@ def apply_candidate001_weight_cast_hoist(model) -> Candidate001BStats:
     agg = getattr(model, "aggregator", None)
     global_blocks = getattr(agg, "global_blocks", None)
     if global_blocks is None:
-        return Candidate001BStats(blocks_patched=0, buffers_registered=0)
+        return WeightCacheStats(blocks_patched=0, buffers_registered=0)
 
     blocks_patched = 0
     buffers_registered = 0
@@ -384,13 +303,13 @@ def apply_candidate001_weight_cast_hoist(model) -> Candidate001BStats:
         block._candidate001_weight_cast_hoist = True
         blocks_patched += 1
 
-    return Candidate001BStats(
+    return WeightCacheStats(
         blocks_patched=blocks_patched,
         buffers_registered=buffers_registered,
     )
 
 
-def apply_candidate001c_frame_mlp_weight_cast_hoist(model) -> Candidate001CStats:
+def apply_candidate001c_frame_mlp_weight_cast_hoist(model) -> WeightCacheStats:
     """Patch frame-attention block MLPs for Candidate 001C.
 
     The original fp32 parameters remain untouched.  Shadow buffers are marked
@@ -399,7 +318,7 @@ def apply_candidate001c_frame_mlp_weight_cast_hoist(model) -> Candidate001CStats
     agg = getattr(model, "aggregator", None)
     frame_blocks = getattr(agg, "frame_blocks", None)
     if frame_blocks is None:
-        return Candidate001CStats(blocks_patched=0, buffers_registered=0)
+        return WeightCacheStats(blocks_patched=0, buffers_registered=0)
 
     blocks_patched = 0
     buffers_registered = 0
@@ -414,13 +333,13 @@ def apply_candidate001c_frame_mlp_weight_cast_hoist(model) -> Candidate001CStats
         block._candidate001c_frame_mlp_weight_cast_hoist = True
         blocks_patched += 1
 
-    return Candidate001CStats(
+    return WeightCacheStats(
         blocks_patched=blocks_patched,
         buffers_registered=buffers_registered,
     )
 
 
-def apply_candidate002a_patch_mlp_weight_cast_hoist(model) -> Candidate002AStats:
+def apply_candidate002a_patch_mlp_weight_cast_hoist(model) -> WeightCacheStats:
     """Patch patch_embed DINO/ViT block MLPs for Candidate 002A.
 
     The original fp32 parameters remain untouched.  Shadow buffers are marked
@@ -439,13 +358,13 @@ def apply_candidate002a_patch_mlp_weight_cast_hoist(model) -> Candidate002AStats
         block._candidate002a_patch_mlp_weight_cast_hoist = True
         blocks_patched += 1
 
-    return Candidate002AStats(
+    return WeightCacheStats(
         blocks_patched=blocks_patched,
         buffers_registered=buffers_registered,
     )
 
 
-def apply_candidate002b1_frame_qkv_weight_cast_hoist(model) -> Candidate002B1Stats:
+def apply_candidate002b1_frame_qkv_weight_cast_hoist(model) -> WeightCacheStats:
     """Patch frame-attention QKV linears for Candidate 002B-1.
 
     Only frame blocks are patched. The original fp32 qkv parameters remain
@@ -455,7 +374,7 @@ def apply_candidate002b1_frame_qkv_weight_cast_hoist(model) -> Candidate002B1Sta
     agg = getattr(model, "aggregator", None)
     frame_blocks = getattr(agg, "frame_blocks", None)
     if frame_blocks is None:
-        return Candidate002B1Stats(blocks_patched=0, buffers_registered=0)
+        return WeightCacheStats(blocks_patched=0, buffers_registered=0)
 
     blocks_patched = 0
     buffers_registered = 0
@@ -474,13 +393,13 @@ def apply_candidate002b1_frame_qkv_weight_cast_hoist(model) -> Candidate002B1Sta
         block._candidate002b1_frame_qkv_weight_cast_hoist = True
         blocks_patched += 1
 
-    return Candidate002B1Stats(
+    return WeightCacheStats(
         blocks_patched=blocks_patched,
         buffers_registered=buffers_registered,
     )
 
 
-def apply_candidate002b2_patch_qkv_weight_cast_hoist(model) -> Candidate002B2Stats:
+def apply_candidate002b2_patch_qkv_weight_cast_hoist(model) -> WeightCacheStats:
     """Patch patch_embed QKV linears for Candidate 002B-2.
 
     Only patch_embed blocks are patched. The original fp32 qkv parameters
@@ -504,13 +423,13 @@ def apply_candidate002b2_patch_qkv_weight_cast_hoist(model) -> Candidate002B2Sta
         block._candidate002b2_patch_qkv_weight_cast_hoist = True
         blocks_patched += 1
 
-    return Candidate002B2Stats(
+    return WeightCacheStats(
         blocks_patched=blocks_patched,
         buffers_registered=buffers_registered,
     )
 
 
-def apply_candidate002b3_gca_qkv_weight_cast_hoist(model) -> Candidate002B3Stats:
+def apply_candidate002b3_gca_qkv_weight_cast_hoist(model) -> WeightCacheStats:
     """Patch GCA/global QKV linears for Candidate 002B-3.
 
     Only global blocks are patched.  The original fp32 qkv parameters remain
@@ -524,7 +443,7 @@ def apply_candidate002b3_gca_qkv_weight_cast_hoist(model) -> Candidate002B3Stats
     agg = getattr(model, "aggregator", None)
     global_blocks = getattr(agg, "global_blocks", None)
     if global_blocks is None:
-        return Candidate002B3Stats(blocks_patched=0, buffers_registered=0)
+        return WeightCacheStats(blocks_patched=0, buffers_registered=0)
 
     blocks_patched = 0
     buffers_registered = 0
@@ -543,7 +462,7 @@ def apply_candidate002b3_gca_qkv_weight_cast_hoist(model) -> Candidate002B3Stats
         block._candidate002b3_gca_qkv_weight_cast_hoist = True
         blocks_patched += 1
 
-    return Candidate002B3Stats(
+    return WeightCacheStats(
         blocks_patched=blocks_patched,
         buffers_registered=buffers_registered,
     )

@@ -311,19 +311,11 @@ class FlashInferKVCacheManager(BaseFlashInferKVCacheManager):
         # "fa4" (official FlashAttention-4 CuTe paged path), or "trtllm-gen"
         # (paged Blackwell candidate in FlashInfer 0.6.x).
         _fi_backend = self.backend
-        self.workspace_buffer = torch.zeros(
-            128 * 1024 * 1024, dtype=torch.uint8, device=device
-        )
-
-        # ── Wrapper-internal GPU buffers (use_cuda_graph=True path) ──────────
-        # When use_cuda_graph=True the wrapper guarantees these buffers stay at fixed
-        # GPU addresses for its lifetime, which is what lets us later capture run()
-        # inside a torch.cuda.graph.  plan() copies values from our CPU-pinned buffers
-        # below into these on every frame (small, async, pipelined H→D).
-        self._qo_indptr_buf_gpu = torch.zeros(2, dtype=torch.int32, device=device)
-        self._kv_indptr_buf_gpu = torch.zeros(2, dtype=torch.int32, device=device)
-        self._kv_indices_buf_gpu = torch.zeros(self.max_num_pages, dtype=torch.int32, device=device)
-        self._kv_last_page_len_buf_gpu = torch.zeros(1, dtype=torch.int32, device=device)
+        self.workspace_buffer = None
+        self._qo_indptr_buf_gpu = None
+        self._kv_indptr_buf_gpu = None
+        self._kv_indices_buf_gpu = None
+        self._kv_last_page_len_buf_gpu = None
 
         self.prefill_wrapper = None
         self._fa4_flash_attn_varlen_func = None
@@ -430,6 +422,15 @@ class FlashInferKVCacheManager(BaseFlashInferKVCacheManager):
                     + json.dumps(self.candidate021_metadata, sort_keys=True)
                 )
         else:
+            # Only the FlashInfer wrapper uses this workspace and fixed-address
+            # metadata. The public FA4 call uses its own inputs above.
+            self.workspace_buffer = torch.zeros(
+                128 * 1024 * 1024, dtype=torch.uint8, device=device
+            )
+            self._qo_indptr_buf_gpu = torch.zeros(2, dtype=torch.int32, device=device)
+            self._kv_indptr_buf_gpu = torch.zeros(2, dtype=torch.int32, device=device)
+            self._kv_indices_buf_gpu = torch.zeros(self.max_num_pages, dtype=torch.int32, device=device)
+            self._kv_last_page_len_buf_gpu = torch.zeros(1, dtype=torch.int32, device=device)
             self.prefill_wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
                 self.workspace_buffer,
                 kv_layout="NHD",
@@ -462,19 +463,16 @@ class FlashInferKVCacheManager(BaseFlashInferKVCacheManager):
         # CPU inputs).  We already know the value on the host: see compute_attention.
         self._seq_lens_buf = torch.zeros(1, dtype=torch.int32, pin_memory=True)
 
-        # Pre-allocated per-layer attention output buffers.  FlashInfer's run()
-        # otherwise calls torch.zeros((q_len, H, D)) every layer × frame, which
-        # nsys flags as a chunky cudaMemsetAsync.  Re-using the same buffer
-        # ([q_len, num_heads, head_dim]) per layer avoids both the alloc and the
-        # zero-init.  Output is fully overwritten by the kernel so zero-init is
-        # unnecessary.
-        self._attn_out_buffers: List[Tensor] = [
-            torch.empty(
-                tokens_per_frame, num_heads, head_dim,
-                dtype=self.dtype, device=device,
-            )
-            for _ in range(num_blocks)
-        ]
+        # FlashInfer run() accepts reusable output buffers; the FA4 call does not.
+        self._attn_out_buffers: List[Tensor] = []
+        if not self.use_fa4:
+            self._attn_out_buffers = [
+                torch.empty(
+                    tokens_per_frame, num_heads, head_dim,
+                    dtype=self.dtype, device=device,
+                )
+                for _ in range(num_blocks)
+            ]
 
         # ── Graph-capture mode scaffolding (default OFF) ────────────────────
         # Set ``_graph_mode = True`` to switch ``append_frame``/``compute_attention``
@@ -786,22 +784,12 @@ class FlashInferKVCacheManager(BaseFlashInferKVCacheManager):
         camera_only: bool = False,
         num_register_tokens: int = 4,
     ) -> None:
-        """
-        Evict old window patch pages (recycle to free list).
-
-        Special pages are NEVER evicted.
-        Scale pages are NEVER evicted.
-        Only live_window_patch_pages beyond `sliding_window` are recycled.
-
-        When ``_defer_eviction`` is True, this method is a no-op.  The caller
-        is expected to later call ``execute_deferred_eviction()`` (keep frame)
-        or ``rollback_last_frame()`` (discard frame).
-        """
-        if self._defer_eviction:
-            return
-        while len(self.live_window_patch_pages[block_idx]) > sliding_window:
-            old_page = self.live_window_patch_pages[block_idx].popleft()
-            self.free_patch_pages[block_idx].append(old_page)
+        """Use upstream eviction only under the supported every-frame policy."""
+        self._validate_append_policy()
+        super().evict_frames(
+            block_idx, scale_frames, sliding_window, cross_frame_special,
+            include_scale_frames, camera_only, num_register_tokens,
+        )
 
     def execute_deferred_eviction(
         self,
@@ -810,91 +798,12 @@ class FlashInferKVCacheManager(BaseFlashInferKVCacheManager):
         sliding_window: int,
         **kwargs,
     ) -> None:
-        """Run the eviction that was skipped while ``_defer_eviction`` was True."""
-        while len(self.live_window_patch_pages[block_idx]) > sliding_window:
-            old_page = self.live_window_patch_pages[block_idx].popleft()
-            self.free_patch_pages[block_idx].append(old_page)
+        """Cyclic page writes cannot defer eviction of overwritten data."""
+        raise RuntimeError("Deferred eviction is unsupported by the Thor cyclic KV cache")
 
     def rollback_last_frame(self, block_idx: int) -> None:
-        """Undo the most recent ``append_frame()`` for *block_idx*.
-
-        This reverses all three sub-operations of ``append_frame``:
-        patch page allocation, special-token write, and frame_count increment.
-        It must be called **before** any eviction for that frame (i.e. while
-        ``_defer_eviction`` is True or before ``evict_frames`` is called).
-        """
-        assert self.frame_count[block_idx] > 0, (
-            f"block {block_idx}: cannot rollback, frame_count is 0"
-        )
-
-        # 1) Undo patch page ── pop from whichever deque it was routed to.
-        if self.frame_count[block_idx] > self.scale_frames:
-            page_id = self.live_window_patch_pages[block_idx].pop()
-        else:
-            page_id = self.scale_patch_pages[block_idx].pop()
-        self.free_patch_pages[block_idx].append(page_id)
-
-        # 2) Undo special tokens
-        n = self.num_special_tokens
-        new_count = self.special_token_count[block_idx] - n
-        assert new_count >= 0, (
-            f"block {block_idx}: special_token_count underflow "
-            f"({self.special_token_count[block_idx]} - {n})"
-        )
-        new_num_pages = math.ceil(new_count / self.page_size) if new_count > 0 else 0
-        while len(self.all_special_pages[block_idx]) > new_num_pages:
-            freed = self.all_special_pages[block_idx].pop()
-            self.free_special_pages[block_idx].append(freed)
-        self.special_token_count[block_idx] = new_count
-
-        # 3) Decrement frame count
-        self.frame_count[block_idx] -= 1
-
-    def get_cache_stats(self, block_idx: int = 0) -> dict:
-        """Read-only snapshot of cache occupancy for one block.
-
-        Useful for debugging keyframe / sliding-window behavior.
-
-        Returns:
-            dict with keys:
-              - ``frame_count``   total frames ever appended (minus rollbacks)
-              - ``scale_pages``   scale-region patch pages currently held
-              - ``live_pages``    sliding-window patch pages currently held
-              - ``free_pages``    patch pages on the free list
-              - ``special_tokens`` running count of special tokens written
-        """
-        return {
-            "frame_count":    int(self.frame_count[block_idx]),
-            "scale_pages":    len(self.scale_patch_pages[block_idx]),
-            "live_pages":     len(self.live_window_patch_pages[block_idx]),
-            "free_pages":     len(self.free_patch_pages[block_idx]),
-            "special_tokens": int(self.special_token_count[block_idx]),
-        }
-
-    def _gather_kv(self, block_idx: int):
-        """
-        Gather all visible K and V tokens from the paged cache into dense tensors.
-
-        Used by force_fp32 mode to bypass the FlashInfer FA2 kernel (which only
-        supports fp16/bf16) and instead run F.scaled_dot_product_attention in fp32.
-
-        Returns:
-            k_flat: [kv_len, H, D]  — all visible K tokens concatenated
-            v_flat: [kv_len, H, D]  — all visible V tokens concatenated
-        """
-        visible  = self.build_visible_page_table(block_idx)
-        last_len = self.compute_last_page_len(block_idx)
-        P = self.page_size
-
-        parts_k, parts_v = [], []
-        for i, pid in enumerate(visible):
-            n = last_len if (i == len(visible) - 1) else P
-            parts_k.append(self.kv_caches[block_idx][pid, 0, :n])  # [n, H, D]
-            parts_v.append(self.kv_caches[block_idx][pid, 1, :n])
-
-        k_flat = torch.cat(parts_k, dim=0)  # [kv_len, H, D]
-        v_flat = torch.cat(parts_v, dim=0)
-        return k_flat, v_flat
+        """Reject rollback because cyclic writes may already replace live pages."""
+        raise RuntimeError("Rollback is unsupported by the Thor cyclic KV cache")
 
     def _compute_fa4_attention(self, block_idx: int, q: Tensor) -> Tensor:
         """Run the public FA4 varlen call with the selected cache layout."""
@@ -1358,26 +1267,6 @@ class FlashInferKVCacheManager(BaseFlashInferKVCacheManager):
             list(self.all_special_pages[block_idx])
         )
 
-    def compute_last_page_len(self, block_idx: int) -> int:
-        """
-        Valid token count in the last page of the visible sequence.
-
-        - No special pages      → last page is a patch page.
-                                  Returns patches_per_frame (real tokens written),
-                                  which may be < page_size when page_size was rounded
-                                  up to a power of 2.
-        - Special tail partial  → special_token_count % page_size.
-        - Special tail exactly full → page_size.
-        """
-        if not self.all_special_pages[block_idx]:
-            # Last page is a patch page.  We wrote patches_per_frame tokens (0..P-1);
-            # positions P..page_size-1 are zero padding.  Tell FlashInfer the true
-            # valid count so it doesn't read beyond the real tokens.
-            return self.patches_per_frame
-
-        tail = self.special_token_count[block_idx] % self.page_size
-        return self.page_size if tail == 0 else tail
-
     # ── Internal write helpers ────────────────────────────────────────────────
 
     def _write_patch_page(self, block_idx: int, patch_k: Tensor, patch_v: Tensor) -> int:
@@ -1430,51 +1319,3 @@ class FlashInferKVCacheManager(BaseFlashInferKVCacheManager):
             self.live_window_patch_pages[block_idx].append(page_id)
 
         return page_id
-
-    def _write_special_tokens(self, block_idx: int, sp_k: Tensor, sp_v: Tensor) -> None:
-        """
-        Append num_special_tokens (6) special tokens to the special stream.
-
-        Direct tensor slice assignment to kv_caches[block_idx][tail_page, 0/1,
-        tail_offset : tail_offset+write_n] avoids the Python→C++/CUDA dispatch
-        overhead of flashinfer.page.append_paged_kv_cache.
-
-        Handles page-boundary crossing: if 6 tokens straddle two pages, performs
-        two slice writes (rare — page_size=256 >> 6).
-        """
-        remaining = self.num_special_tokens   # 6
-        written   = 0
-
-        while remaining > 0:
-            tail_offset = self.special_token_count[block_idx] % self.page_size
-
-            if tail_offset == 0:
-                # Current tail page is full (or no page exists) — allocate a new one
-                assert self.free_special_pages[block_idx], (
-                    f"block {block_idx}: special page pool exhausted at "
-                    f"special_token_count={self.special_token_count[block_idx]}. "
-                    f"Increase max_total_frames."
-                )
-                new_page = self.free_special_pages[block_idx].pop()
-                self.all_special_pages[block_idx].append(new_page)
-
-            tail_page = self.all_special_pages[block_idx][-1]
-            space     = self.page_size - tail_offset   # free slots in tail page
-            write_n   = min(remaining, space)
-
-            # Direct slice write: kv_caches[block_idx][tail_page, 0/1, offset:offset+n]
-            # shape: [page_size, H, D];  slice [tail_offset:tail_offset+write_n, :, :]
-            end = tail_offset + write_n
-            self.kv_caches[block_idx][tail_page, 0, tail_offset:end] = sp_k[written:written + write_n]
-            self.kv_caches[block_idx][tail_page, 1, tail_offset:end] = sp_v[written:written + write_n]
-
-            self.special_token_count[block_idx] += write_n
-            written   += write_n
-            remaining -= write_n
-
-    # ── Legacy property (used by stream.py) ──────────────────────────────────
-
-    @property
-    def num_frames(self) -> int:
-        """Number of frames appended to block 0 (representative)."""
-        return self.frame_count[0] if self.frame_count else 0

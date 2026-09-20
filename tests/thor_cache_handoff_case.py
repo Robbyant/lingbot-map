@@ -1,4 +1,5 @@
 """Isolated GPU cases launched by test_thor_gpu; no weights or timing needed."""
+import copy
 import os
 import types
 import unittest
@@ -26,6 +27,10 @@ class CacheHandoffCase(unittest.TestCase):
     def setUp(self):
         self.manager._graph_mode = False
         self.manager.reset()
+
+    def test_fa4_omits_unused_flashinfer_buffers(self):
+        self.assertIsNone(self.manager.workspace_buffer)
+        self.assertEqual(self.manager._attn_out_buffers, [])
 
     @torch.no_grad()
     def test_scale_attention_writes_every_cache_block(self):
@@ -151,7 +156,7 @@ class CacheHandoffCase(unittest.TestCase):
         torch.cuda.synchronize()
 
     @torch.no_grad()
-    def test_eager_rollback_reuses_special_page(self):
+    def test_rollback_and_deferred_eviction_reject_without_mutation(self):
         manager = self.manager
         block = manager.num_blocks - 1
         count = manager.page_size // manager.num_special_tokens + 1
@@ -159,14 +164,21 @@ class CacheHandoffCase(unittest.TestCase):
         v = -k
         for _ in range(count):
             manager.append_frame(block, k, v)
-        total = manager.special_token_count[block]
-        pages = list(manager.all_special_pages[block])
-        before = manager.kv_caches[block][pages].clone()
-        manager.rollback_last_frame(block)
-        manager.append_frame(block, k, v)
-        self.assertEqual(manager.special_token_count[block], total)
-        self.assertEqual(manager.all_special_pages[block], pages)
-        self.assertTrue(torch.equal(manager.kv_caches[block][pages], before))
+        before = manager.kv_caches[block].clone()
+        state = {
+            name: copy.deepcopy(getattr(manager, name))
+            for name in ("frame_count", "special_token_count", "scale_patch_pages",
+                         "live_window_patch_pages", "free_patch_pages",
+                         "all_special_pages", "free_special_pages")
+        }
+        for operation, args in ((manager.rollback_last_frame, (block,)),
+                                (manager.execute_deferred_eviction, (block, 8, 64))):
+            with self.subTest(operation=operation.__name__):
+                with self.assertRaisesRegex(RuntimeError, "unsupported"):
+                    operation(*args)
+                self.assertTrue(torch.equal(manager.kv_caches[block], before))
+                for name, expected in state.items():
+                    self.assertEqual(getattr(manager, name), expected, name)
 
 
 if __name__ == "__main__":

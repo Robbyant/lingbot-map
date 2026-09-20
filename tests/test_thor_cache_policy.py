@@ -72,6 +72,32 @@ class ThorCachePolicyTest(unittest.TestCase):
                     manager.append_frame(0, k, v)
                     self.assertEqual(manager.frame_count, [frames + 1])
 
+    def test_rollback_and_deferred_eviction_reject_without_mutation(self):
+        for frames in (0, 1, 3, 5):
+            for graph_mode in (False, True):
+                for defer_eviction in (False, True):
+                    for operation in ("rollback_last_frame", "execute_deferred_eviction"):
+                        with self.subTest(frames=frames, graph=graph_mode,
+                                          deferred=defer_eviction, operation=operation):
+                            manager = self.make_cache(frames)
+                            manager._graph_mode = graph_mode
+                            manager._defer_eviction = defer_eviction
+                            before = self.snapshot(manager)
+                            args = (0,) if operation == "rollback_last_frame" else (0, 1, 2)
+                            with self.assertRaisesRegex(RuntimeError, "unsupported"):
+                                getattr(manager, operation)(*args)
+                            self.assert_unchanged(manager, before)
+
+    def test_evict_rejects_dynamic_keyframes_without_mutation(self):
+        for flag in ("_skip_append", "_defer_eviction"):
+            with self.subTest(flag=flag):
+                manager = self.make_cache(5)
+                setattr(manager, flag, True)
+                before = self.snapshot(manager)
+                with self.assertRaisesRegex(RuntimeError, "dynamic keyframes are unsupported"):
+                    manager.evict_frames(0, 1, 2)
+                self.assert_unchanged(manager, before)
+
     def test_graph_prepare_rejects_before_buffer_updates(self):
         for route in (None, "direct_kv_append"):
             for flag in ("_skip_append", "_defer_eviction"):
