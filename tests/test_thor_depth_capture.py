@@ -1,4 +1,4 @@
-"""CPU control-flow checks of the historical whole-frame graph boundary."""
+"""CPU control-flow checks of static graphs and dynamic streaming state."""
 from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 import unittest
@@ -38,24 +38,33 @@ class DepthCaptureTest(unittest.TestCase):
         self.image = torch.ones(1, 1, 3, 378, 518, device="cpu")
         self.manager = SimpleNamespace(_graph_mode=True, _nvtx_profile=True,
                                        prepare_frame_for_graph=Mock())
-        aggregator = SimpleNamespace(total_frames_processed=18, _nvtx_profile=True,
-                                     kv_cache_manager=self.manager)
-        camera = SimpleNamespace(frame_idx=18, history=list(range(18)))
+        aggregator = SimpleNamespace(
+            total_frames_processed=18, _nvtx_profile=True, kv_cache_manager=self.manager,
+            enable_3d_rope=True, rope3d=object(), _cached_pos3d=None,
+            _get_3d_positions_streaming=lambda n, h, w, device, start, end:
+                torch.tensor([start], dtype=torch.float32, device="cpu"),
+        )
+        camera = SimpleNamespace(frame_idx=18, kv_cache=[{"history": list(range(18))}])
 
         def aggregate(images, **kwargs):
             self.flags.append(("aggregate", torch.are_deterministic_algorithms_enabled()))
             self.shapes_seen.append(tuple(images.shape))
-            position = aggregator.total_frames_processed
-            self.positions_seen.append(position)
+            position = aggregator._get_3d_positions_streaming(
+                1, *images.shape[-2:], images.device,
+                aggregator.total_frames_processed, aggregator.total_frames_processed + 1,
+            )
+            self.positions_seen.append(float(position[0]))
+            if self.recording is not None:
+                self.feature.fill_(float("nan"))
             self.launch("aggregate", lambda: self.feature.copy_(images.sum().reshape(1) + position))
             aggregator.total_frames_processed += images.shape[1]
             return [self.feature], 6
 
         def predict_camera(features, **kwargs):
             self.flags.append(("camera", torch.are_deterministic_algorithms_enabled()))
-            history_length = len(camera.history)
+            history_length = len(camera.kv_cache[0]["history"])
             self.launch("camera", lambda: self.pose_output.copy_(features[0] + history_length))
-            camera.history.append(camera.frame_idx)
+            camera.kv_cache[0]["history"].append(camera.frame_idx)
             camera.frame_idx += 1
             return {"pose_enc": self.pose_output}
 
@@ -71,6 +80,7 @@ class DepthCaptureTest(unittest.TestCase):
             parameters=lambda: iter([self.feature]), clean_kv_cache=Mock(),
         )
         self.original_depth = depth
+        self.original_positions = aggregator._get_3d_positions_streaming
 
     def launch(self, name, operation):
         if self.recording is None:
@@ -99,50 +109,129 @@ class DepthCaptureTest(unittest.TestCase):
             yield
 
     def run_capture(self):
-        return execution.capture_whole_frame(
+        return execution.prime_and_capture_depth_route(
             self.model, self.image, capture_frame=18, scale_frames=8,
             side_stream=Mock(), dtype=torch.bfloat16,
             compiled_depth_forward_impl=self.compiled,
         )
 
-    def test_one_graph_contains_aggregator_camera_and_depth_with_flags_false(self):
+    def test_static_graphs_exclude_camera_and_capture_strict_depth(self):
         with self.fake_cuda():
-            graph, output = self.run_capture()
-        self.assertEqual(self.graphs, [graph])
-        self.assertEqual([name for name, _ in graph.operations], ["aggregate", "camera", "depth"])
-        self.assertEqual(self.flags, [(name, False) for name in ("aggregate", "camera", "depth")] * 2)
+            step, output, contract = self.run_capture()
+        self.assertEqual(self.graphs, [step.aggregator_graph, step.depth_graph])
+        self.assertEqual([name for name, _ in step.aggregator_graph.operations], ["aggregate"])
+        self.assertEqual([name for name, _ in step.depth_graph.operations], ["depth"])
+        self.assertEqual(self.flags, [("aggregate", False)] * 2 + [("depth", True)] * 2)
         self.assertEqual(self.manager.prepare_frame_for_graph.call_args_list, [call(18), call(18)])
         self.assertEqual(self.shapes_seen, [(1, 1, 3, 378, 518)] * 2)
         self.assertEqual(378 // 14 * (518 // 14) + 6, 1005)
-        self.assertEqual(set(output), {"pose_enc", "depth", "images"})
+        self.assertEqual(set(output), {"depth", "images"})
         self.assertIs(self.model._predict_depth, self.original_depth)
+        execution.validate_capture_depth_contract(contract)
 
-    def test_prime_and_capture_consume_python_state_without_dynamic_restore(self):
+    def test_prime_and_capture_preserve_unprocessed_frame_and_camera_history(self):
         with self.fake_cuda():
             self.run_capture()
-        self.assertEqual(self.positions_seen, [18, 19])
-        self.assertEqual(self.model.aggregator.total_frames_processed, 20)
-        self.assertEqual(self.model.camera_head.frame_idx, 20)
-        self.assertEqual(self.model.camera_head.history, list(range(20)))
+        self.assertEqual(self.positions_seen, [18, 18])
+        self.assertEqual(self.model.aggregator.total_frames_processed, 18)
+        self.assertEqual(self.model.camera_head.frame_idx, 18)
+        self.assertEqual(self.model.camera_head.kv_cache[0]["history"], list(range(18)))
+        self.assertIs(self.model.aggregator._get_3d_positions_streaming, self.original_positions)
 
-    def test_replay_keeps_temporal_position_and_camera_history_fixed(self):
+    def test_replay_updates_temporal_position_and_camera_history(self):
         with self.fake_cuda():
-            graph, output = self.run_capture()
+            step, output, _ = self.run_capture()
+            position_address = step.positions.data_ptr()
             pointers = {name: tensor.data_ptr() for name, tensor in output.items()}
             for frame in (18, 19, 20):
                 self.image.fill_(frame)
-                self.manager.prepare_frame_for_graph(frame)
-                graph.replay()
-                expected = self.image.sum().reshape(1) + 19
+                step.prepare(frame)
+                step.replay()
+                expected = self.image.sum().reshape(1) + frame
                 self.assertTrue(torch.equal(output["depth"], expected * 2))
-                self.assertTrue(torch.equal(output["pose_enc"], expected + 19))
-                self.assertEqual({name: tensor.data_ptr() for name, tensor in output.items()}, pointers)
-                self.assertEqual(self.model.aggregator.total_frames_processed, 20)
-                self.assertEqual(self.model.camera_head.frame_idx, 20)
-                self.assertEqual(self.model.camera_head.history, list(range(20)))
-        self.assertEqual(graph.replays, 3)
-        self.assertEqual(self.positions_seen, [18, 19])
-        self.assertEqual(len(self.flags), 6)
+                self.assertTrue(torch.equal(output["pose_enc"], expected + frame))
+                self.assertEqual({name: output[name].data_ptr() for name in pointers}, pointers)
+                self.assertEqual(step.positions.data_ptr(), position_address)
+                self.assertEqual(float(step.positions[0]), frame)
+                self.assertEqual(self.model.aggregator.total_frames_processed, frame + 1)
+                self.assertEqual(self.model.camera_head.frame_idx, frame + 1)
+                self.assertEqual(self.model.camera_head.kv_cache[0]["history"], list(range(frame + 1)))
+        self.assertEqual(step.aggregator_graph.replays, 4)  # Includes depth-priming execution.
+        self.assertEqual(step.depth_graph.replays, 3)
+        self.assertEqual(self.positions_seen, [18, 18])
+        self.assertEqual(self.flags[-3:], [("camera", False)] * 3)
+
+    def test_depth_prime_receives_executed_aggregator_buffers(self):
+        def check(features, *args, **kwargs):
+            self.assertTrue(torch.isfinite(features[0]).all())
+            self.assertTrue(torch.equal(features[0], self.image.sum().reshape(1) + 18))
+            return self.original_depth(features, *args, **kwargs)
+
+        self.model._predict_depth = check
+        with self.fake_cuda():
+            self.run_capture()
+
+    def test_missing_duplicate_or_out_of_order_prepare_fails(self):
+        with self.fake_cuda():
+            step, _, _ = self.run_capture()
+            with self.assertRaisesRegex(RuntimeError, "Prepare"):
+                step.replay()
+            with self.assertRaisesRegex(RuntimeError, "in sequence"):
+                step.prepare(19)
+            step.prepare(18)
+            with self.assertRaisesRegex(RuntimeError, "once"):
+                step.prepare(18)
+
+    def test_camera_failure_invalidates_step(self):
+        with self.fake_cuda():
+            step, _, _ = self.run_capture()
+            step.prepare(18)
+            self.model._predict_camera = Mock(side_effect=RuntimeError("camera failed"))
+            with self.assertRaisesRegex(RuntimeError, "camera failed"):
+                step.replay()
+            with self.assertRaisesRegex(RuntimeError, "cannot be reused"):
+                step.replay()
+            with self.assertRaisesRegex(RuntimeError, "cannot be reused"):
+                step.prepare(18)
+
+    def test_camera_counter_must_advance(self):
+        with self.fake_cuda():
+            step, _, _ = self.run_capture()
+            step.prepare(18)
+            self.model._predict_camera = Mock(return_value={"pose_enc": self.pose_output})
+            with self.assertRaisesRegex(RuntimeError, "advance exactly one"):
+                step.replay()
+            self.assertTrue(step.failed)
+
+    def test_aggregate_failure_restores_positions_and_counter(self):
+        def fail(*args, **kwargs):
+            self.model.aggregator.total_frames_processed += 1
+            raise RuntimeError("aggregate failed")
+
+        self.model._aggregate_features = fail
+        with self.fake_cuda(), self.assertRaisesRegex(RuntimeError, "aggregate failed"):
+            self.run_capture()
+        self.assertEqual(self.model.aggregator.total_frames_processed, 18)
+        self.assertIs(self.model.aggregator._get_3d_positions_streaming, self.original_positions)
+
+    def test_compile_during_capture_or_replay_rejected(self):
+        before = execution.compile_counter_snapshot()
+        after = {**before, "frames.total": before["frames.total"] + 1}
+        with self.fake_cuda(), patch.object(execution, "compile_counter_snapshot", side_effect=[before, after]):
+            with self.assertRaisesRegex(RuntimeError, "compiled or recompiled"):
+                self.run_capture()
+        with patch.object(execution, "compile_counter_snapshot", side_effect=[before, after]):
+            with self.assertRaisesRegex(RuntimeError, "compiled or recompiled"):
+                with execution.replay_without_recompile():
+                    pass
+
+    def test_replay_compile_guard_restores_config(self):
+        previous = torch._dynamo.config.error_on_recompile
+        with execution.replay_without_recompile() as evidence:
+            self.assertTrue(torch._dynamo.config.error_on_recompile)
+            self.assertTrue(torch._dynamo.config.fail_on_recompile_limit_hit)
+        self.assertFalse(any(evidence.values()))
+        self.assertEqual(torch._dynamo.config.error_on_recompile, previous)
 
     def test_capture_rejects_deterministic_entry_and_wrong_compiled_callable(self):
         with self.fake_cuda():

@@ -56,13 +56,13 @@ from lingbot_map.layers.flashinfer_cache import (
 )
 
 from .fa4_runtime import (
-    candidate022_fa4_b15_enabled,
-    prepare_candidate022_fa4_b15,
+    fa4_overlay_enabled,
+    prepare_fa4_overlay,
 )
 from .kv_append import (
-    candidate021_direct_append_loaded_module_fingerprint,
-    candidate021_direct_append_paged_kv_cache,
-    validate_candidate021_direct_append_runtime,
+    direct_append_module_fingerprint,
+    append_paged_kv_cache,
+    validate_direct_append_runtime,
 )
 
 try:
@@ -72,13 +72,13 @@ except ImportError:
     FLASHINFER_AVAILABLE = False
 
 
-CANDIDATE021_DIRECT_KV_APPEND_ROUTE = "direct_kv_append"
-CANDIDATE021_PROJECTION_SHADOW_DIRECT_KV_APPEND_ROUTE = (
+DIRECT_KV_APPEND_ROUTE = "direct_kv_append"
+PROJECTION_SHADOW_DIRECT_KV_APPEND_ROUTE = (
     "projection_shadow_direct_kv_append"
 )
-CANDIDATE021_FA4_VERSION = "4.0.0b14"
-CANDIDATE021_ALLOWED_TOKENS_PER_FRAME = frozenset((783, 978, 1005, 1042))
-CANDIDATE021_FA4_SOURCE_HASHES = {
+REFERENCE_FA4_VERSION = "4.0.0b14"
+SUPPORTED_TOKENS_PER_FRAME = frozenset((783, 978, 1005, 1042))
+REFERENCE_FA4_SOURCE_HASHES = {
     "interface.py": "27aa8985be0464bc872cf773d39c1b3266ce6f1b3dd2ed63e0f9829861b59c9b",
     "flash_fwd_sm100.py": "327dc9741515af112d09555fe5641ba855f45c018f7cddd61bf5c9caf704b2ed",
     "paged_kv.py": "2aafce6dc0bb6fdaa683c4067fc18c34d6232a25d05c090dcf2b9a9350efc009",
@@ -86,16 +86,16 @@ CANDIDATE021_FA4_SOURCE_HASHES = {
 }
 
 
-def _resolve_candidate021_route() -> Optional[str]:
+def _resolve_housekeeping_route() -> Optional[str]:
     from .options import housekeeping_route
     return housekeeping_route()
 
 
-def _candidate021_direct_kv_append_enabled(route: Optional[str]) -> bool:
-    """Whether a route owns the exact Candidate 021C2 append capability."""
+def _direct_kv_append_enabled(route: Optional[str]) -> bool:
+    """Whether a route owns the combined paged-KV append path."""
     return route in (
-        CANDIDATE021_DIRECT_KV_APPEND_ROUTE,
-        CANDIDATE021_PROJECTION_SHADOW_DIRECT_KV_APPEND_ROUTE,
+        DIRECT_KV_APPEND_ROUTE,
+        PROJECTION_SHADOW_DIRECT_KV_APPEND_ROUTE,
     )
 
 
@@ -192,21 +192,21 @@ class FlashInferKVCacheManager(BaseFlashInferKVCacheManager):
                 dtype = torch.bfloat16
             self.dtype = dtype
         self.device = device
-        self.candidate021_route = _resolve_candidate021_route()
-        self.candidate021_metadata = None
-        self.candidate022_metadata = None
-        self._candidate021_direct_runtime_contract = None
-        self._candidate021_direct_loaded_module = None
-        if candidate022_fa4_b15_enabled() and not self.use_fa4:
+        self.housekeeping_mode = _resolve_housekeeping_route()
+        self.housekeeping_metadata = None
+        self.fa4_overlay_metadata = None
+        self._direct_append_runtime_contract = None
+        self._direct_append_loaded_module = None
+        if fa4_overlay_enabled() and not self.use_fa4:
             raise RuntimeError(
-                "Candidate 022 FA4 beta15 contract rejected: "
+                "FA4 beta15 contract rejected: "
                 f"backend={self.backend!r}, expected 'fa4'"
             )
-        if self.candidate021_route is not None:
-            candidate_device = torch.device(device)
-            candidate_cc = (
-                torch.cuda.get_device_capability(candidate_device)
-                if candidate_device.type == "cuda" and torch.cuda.is_available()
+        if self.housekeeping_mode is not None:
+            runtime_device = torch.device(device)
+            runtime_cc = (
+                torch.cuda.get_device_capability(runtime_device)
+                if runtime_device.type == "cuda" and torch.cuda.is_available()
                 else None
             )
             contract_errors = []
@@ -216,10 +216,10 @@ class FlashInferKVCacheManager(BaseFlashInferKVCacheManager):
                 contract_errors.append("force_fp32 must be false")
             if self.dtype != torch.bfloat16:
                 contract_errors.append(f"dtype={self.dtype}, expected torch.bfloat16")
-            if candidate_device.type != "cuda":
-                contract_errors.append(f"device={candidate_device}, expected CUDA")
-            if candidate_cc != (11, 0):
-                contract_errors.append(f"compute_capability={candidate_cc}, expected (11, 0)")
+            if runtime_device.type != "cuda":
+                contract_errors.append(f"device={runtime_device}, expected CUDA")
+            if runtime_cc != (11, 0):
+                contract_errors.append(f"compute_capability={runtime_cc}, expected (11, 0)")
             if self.num_blocks != 24:
                 contract_errors.append(f"num_blocks={self.num_blocks}, expected 24")
             if self.num_heads != 16:
@@ -230,10 +230,10 @@ class FlashInferKVCacheManager(BaseFlashInferKVCacheManager):
                 contract_errors.append(
                     f"num_special_tokens={self.num_special_tokens}, expected 6"
                 )
-            if self.tokens_per_frame not in CANDIDATE021_ALLOWED_TOKENS_PER_FRAME:
+            if self.tokens_per_frame not in SUPPORTED_TOKENS_PER_FRAME:
                 contract_errors.append(
                     f"tokens_per_frame={self.tokens_per_frame}, expected one of "
-                    f"{sorted(CANDIDATE021_ALLOWED_TOKENS_PER_FRAME)}"
+                    f"{sorted(SUPPORTED_TOKENS_PER_FRAME)}"
                 )
             if self.page_size != self.patches_per_frame:
                 contract_errors.append(
@@ -242,21 +242,21 @@ class FlashInferKVCacheManager(BaseFlashInferKVCacheManager):
                 )
             if contract_errors:
                 raise RuntimeError(
-                    "Candidate 021 cache contract rejected: "
+                    "Thor cache contract rejected: "
                     + "; ".join(contract_errors)
                 )
-            if _candidate021_direct_kv_append_enabled(self.candidate021_route):
-                self._candidate021_direct_runtime_contract = (
-                    validate_candidate021_direct_append_runtime()
+            if _direct_kv_append_enabled(self.housekeeping_mode):
+                self._direct_append_runtime_contract = (
+                    validate_direct_append_runtime()
                 )
-                self._candidate021_direct_loaded_module = (
-                    candidate021_direct_append_loaded_module_fingerprint()
+                self._direct_append_loaded_module = (
+                    direct_append_module_fingerprint()
                 )
 
-        # Candidate 022 validates and selects its process-wide FA4 source before
+        # The FA4 overlay loader validates and selects its process-wide FA4 source before
         # allocating the large cache and workspace buffers below.
         if self.use_fa4:
-            self.candidate022_metadata = prepare_candidate022_fa4_b15()
+            self.fa4_overlay_metadata = prepare_fa4_overlay()
 
         # ── Page pool sizing ─────────────────────────────────────────────────
         # Patch: scale + window + 16 headroom  (pages recycled → fixed count)
@@ -339,29 +339,29 @@ class FlashInferKVCacheManager(BaseFlashInferKVCacheManager):
                     "\"flash-attn-4[cu13]\"`)."
                 ) from exc
             self._fa4_flash_attn_varlen_func = flash_attn_varlen_func
-            if self.candidate021_route is not None:
+            if self.housekeeping_mode is not None:
                 import flash_attn.cute.interface as fa4_interface
 
                 cute_root = Path(fa4_interface.__file__).resolve().parent
                 runtime_errors = []
-                if self.candidate022_metadata is not None:
-                    fa4_version = self.candidate022_metadata["version"]
+                if self.fa4_overlay_metadata is not None:
+                    fa4_version = self.fa4_overlay_metadata["version"]
                     observed_hashes = None
                 else:
                     try:
                         fa4_version = importlib.metadata.version("flash-attn-4")
                     except importlib.metadata.PackageNotFoundError as exc:
                         raise RuntimeError(
-                            "Candidate 021 requires the flash-attn-4 distribution metadata"
+                            "Thor requires the flash-attn-4 distribution metadata"
                         ) from exc
-                    expected_source_hashes = CANDIDATE021_FA4_SOURCE_HASHES
+                    expected_source_hashes = REFERENCE_FA4_SOURCE_HASHES
                     observed_hashes = {
                         name: _sha256_file(cute_root / name)
                         for name in expected_source_hashes
                     }
-                    if fa4_version != CANDIDATE021_FA4_VERSION:
+                    if fa4_version != REFERENCE_FA4_VERSION:
                         runtime_errors.append(
-                            f"flash-attn-4={fa4_version}, expected {CANDIDATE021_FA4_VERSION}"
+                            f"flash-attn-4={fa4_version}, expected {REFERENCE_FA4_VERSION}"
                         )
                     for name, expected in expected_source_hashes.items():
                         observed = observed_hashes[name]
@@ -371,16 +371,16 @@ class FlashInferKVCacheManager(BaseFlashInferKVCacheManager):
                             )
                 if runtime_errors:
                     raise RuntimeError(
-                        "Candidate 021 FA4 runtime rejected: "
+                        "Thor FA4 runtime rejected: "
                         + "; ".join(runtime_errors)
                     )
-                is_attention_kernel_route = self.candidate022_metadata is not None
-                is_direct_kv_append_route = _candidate021_direct_kv_append_enabled(
-                    self.candidate021_route
+                is_attention_kernel_route = self.fa4_overlay_metadata is not None
+                is_direct_kv_append_route = _direct_kv_append_enabled(
+                    self.housekeeping_mode
                 )
-                self.candidate021_metadata = {
+                self.housekeeping_metadata = {
                     "enabled": True,
-                    "route": self.candidate021_route,
+                    "route": self.housekeeping_mode,
                     "kernel_route_applied": is_attention_kernel_route,
                     "kv_append_route_applied": is_direct_kv_append_route,
                     "kv_append_impl": (
@@ -390,7 +390,7 @@ class FlashInferKVCacheManager(BaseFlashInferKVCacheManager):
                     ),
                     "attention_impl": (
                         "public_varlen_beta15_qstage2"
-                        if self.candidate022_metadata is not None
+                        if self.fa4_overlay_metadata is not None
                         else "public_varlen"
                     ),
                     "expected_scheduler": "SingleTileVarlenScheduler",
@@ -407,19 +407,19 @@ class FlashInferKVCacheManager(BaseFlashInferKVCacheManager):
                     "q_batch": 1,
                     "fa4_version": fa4_version,
                     "fa4_source_hashes": observed_hashes,
-                    "candidate022_fa4_b15": self.candidate022_metadata,
+                    "candidate022_fa4_b15": self.fa4_overlay_metadata,
                     "direct_kv_append_runtime": (
                         {
-                            **self._candidate021_direct_runtime_contract,
-                            "loaded_module": self._candidate021_direct_loaded_module,
+                            **self._direct_append_runtime_contract,
+                            "loaded_module": self._direct_append_loaded_module,
                         }
                         if is_direct_kv_append_route
                         else None
                     ),
                 }
                 print(
-                    "Candidate021 kernel route enabled: "
-                    + json.dumps(self.candidate021_metadata, sort_keys=True)
+                    "ThorRuntime kernel route enabled: "
+                    + json.dumps(self.housekeeping_metadata, sort_keys=True)
                 )
         else:
             # Only the FlashInfer wrapper uses this workspace and fixed-address
@@ -503,19 +503,19 @@ class FlashInferKVCacheManager(BaseFlashInferKVCacheManager):
         # `_special_positions_buf[i]` = current_total_specials + i  for i ∈ [0, 6).
         # The buf is updated per frame via `torch.add(base, offset, out=buf)`,
         # avoiding a per-frame `torch.arange` allocation + slice copy.
-        self._candidate021_direct_positions_buf = None
-        if _candidate021_direct_kv_append_enabled(self.candidate021_route):
+        self._direct_append_positions_buf = None
+        if _direct_kv_append_enabled(self.housekeeping_mode):
             # Preserve the accepted six-position buffer as a view while extending
             # the same stable storage with constant patch positions [0, P).
-            self._candidate021_direct_positions_buf = torch.empty(
+            self._direct_append_positions_buf = torch.empty(
                 tokens_per_frame, dtype=torch.int32, device=device,
             )
-            self._candidate021_direct_positions_buf[:num_special_tokens].zero_()
-            self._candidate021_direct_positions_buf[num_special_tokens:].copy_(
+            self._direct_append_positions_buf[:num_special_tokens].zero_()
+            self._direct_append_positions_buf[num_special_tokens:].copy_(
                 torch.arange(self.patches_per_frame, dtype=torch.int32, device=device)
             )
             self._special_positions_buf = (
-                self._candidate021_direct_positions_buf[:num_special_tokens]
+                self._direct_append_positions_buf[:num_special_tokens]
             )
         else:
             self._special_positions_buf = torch.zeros(
@@ -540,32 +540,32 @@ class FlashInferKVCacheManager(BaseFlashInferKVCacheManager):
         self._special_kv_indptr_buf = torch.zeros(2, dtype=torch.int32, device=device)
         self._special_kv_last_page_len_buf = torch.zeros(1, dtype=torch.int32, device=device)
 
-        # Candidate 021C2 encodes patch and special writes as two logical
+        # Combined KV append encodes patch and special writes as two logical
         # sequences while retaining the original [specials, patches] K/V order.
         # Every tensor has a stable address and the dynamic scalar fields are
         # updated outside replay by prepare_frame_for_graph().
-        self._candidate021_direct_batch_indices_buf = None
-        self._candidate021_direct_kv_indices_buf = None
-        self._candidate021_direct_kv_indptr_buf = None
-        self._candidate021_direct_kv_last_page_len_buf = None
-        if _candidate021_direct_kv_append_enabled(self.candidate021_route):
-            self._candidate021_direct_batch_indices_buf = torch.zeros(
+        self._direct_append_batch_indices_buf = None
+        self._direct_append_kv_indices_buf = None
+        self._direct_append_kv_indptr_buf = None
+        self._direct_append_kv_last_page_len_buf = None
+        if _direct_kv_append_enabled(self.housekeeping_mode):
+            self._direct_append_batch_indices_buf = torch.zeros(
                 tokens_per_frame, dtype=torch.int32, device=device,
             )
-            self._candidate021_direct_batch_indices_buf[:num_special_tokens].fill_(1)
-            self._candidate021_direct_kv_indices_buf = torch.empty(
+            self._direct_append_batch_indices_buf[:num_special_tokens].fill_(1)
+            self._direct_append_kv_indices_buf = torch.empty(
                 1 + self._special_kv_indices_buf.numel(),
                 dtype=torch.int32,
                 device=device,
             )
-            self._candidate021_direct_kv_indices_buf[0] = 0
-            self._candidate021_direct_kv_indices_buf[1:].copy_(
+            self._direct_append_kv_indices_buf[0] = 0
+            self._direct_append_kv_indices_buf[1:].copy_(
                 self._special_kv_indices_buf
             )
-            self._candidate021_direct_kv_indptr_buf = torch.tensor(
+            self._direct_append_kv_indptr_buf = torch.tensor(
                 [0, 1, 1], dtype=torch.int32, device=device,
             )
-            self._candidate021_direct_kv_last_page_len_buf = torch.tensor(
+            self._direct_append_kv_last_page_len_buf = torch.tensor(
                 [self.patches_per_frame, 0], dtype=torch.int32, device=device,
             )
 
@@ -577,9 +577,9 @@ class FlashInferKVCacheManager(BaseFlashInferKVCacheManager):
         # the first subsequent steady-state graph-mode frame restores the layout.
         self._kv_indices_buf_in_steady_layout: bool = False
 
-        self._candidate021_direct_capture_ready = False
-        self._candidate021_direct_contract = None
-        if _candidate021_direct_kv_append_enabled(self.candidate021_route):
+        self._direct_append_capture_ready = False
+        self._direct_append_contract = None
+        if _direct_kv_append_enabled(self.housekeeping_mode):
             expected_batch = torch.cat(
                 (
                     torch.ones(num_special_tokens, dtype=torch.int32, device=device),
@@ -599,25 +599,25 @@ class FlashInferKVCacheManager(BaseFlashInferKVCacheManager):
             )
             value_errors = []
             if not torch.equal(
-                self._candidate021_direct_batch_indices_buf, expected_batch
+                self._direct_append_batch_indices_buf, expected_batch
             ):
                 value_errors.append("batch order is not [special=1, patch=0]")
             if not torch.equal(
-                self._candidate021_direct_positions_buf[num_special_tokens:],
+                self._direct_append_positions_buf[num_special_tokens:],
                 expected_patch_positions,
             ):
                 value_errors.append("patch positions are not [0,P)")
             if not torch.equal(
-                self._candidate021_direct_kv_indices_buf[1:],
+                self._direct_append_kv_indices_buf[1:],
                 expected_special_pages,
             ):
                 value_errors.append("special page IDs are not ascending")
             if value_errors:
                 raise RuntimeError(
-                    "Candidate 021C2 direct buffer initialization rejected: "
+                    "Combined KV append direct buffer initialization rejected: "
                     + "; ".join(value_errors)
                 )
-            self._candidate021_direct_contract = {
+            self._direct_append_contract = {
                 "graph_only": True,
                 "scale_eager_unchanged": True,
                 "payload_order": "specials_then_patches",
@@ -625,44 +625,44 @@ class FlashInferKVCacheManager(BaseFlashInferKVCacheManager):
                 "special_page_policy": "ascending_from_max_patch_pages",
                 "positions_alias_special_buffer": (
                     self._special_positions_buf.data_ptr()
-                    == self._candidate021_direct_positions_buf.data_ptr()
+                    == self._direct_append_positions_buf.data_ptr()
                 ),
                 "batch_shape": list(
-                    self._candidate021_direct_batch_indices_buf.shape
+                    self._direct_append_batch_indices_buf.shape
                 ),
                 "positions_shape": list(
-                    self._candidate021_direct_positions_buf.shape
+                    self._direct_append_positions_buf.shape
                 ),
                 "kv_indices_shape": list(
-                    self._candidate021_direct_kv_indices_buf.shape
+                    self._direct_append_kv_indices_buf.shape
                 ),
                 "kv_indptr_shape": list(
-                    self._candidate021_direct_kv_indptr_buf.shape
+                    self._direct_append_kv_indptr_buf.shape
                 ),
                 "kv_last_page_len_shape": list(
-                    self._candidate021_direct_kv_last_page_len_buf.shape
+                    self._direct_append_kv_last_page_len_buf.shape
                 ),
                 "buffer_data_ptrs": {
-                    "batch": self._candidate021_direct_batch_indices_buf.data_ptr(),
-                    "positions": self._candidate021_direct_positions_buf.data_ptr(),
-                    "kv_indices": self._candidate021_direct_kv_indices_buf.data_ptr(),
-                    "kv_indptr": self._candidate021_direct_kv_indptr_buf.data_ptr(),
+                    "batch": self._direct_append_batch_indices_buf.data_ptr(),
+                    "positions": self._direct_append_positions_buf.data_ptr(),
+                    "kv_indices": self._direct_append_kv_indices_buf.data_ptr(),
+                    "kv_indptr": self._direct_append_kv_indptr_buf.data_ptr(),
                     "kv_last_page_len": (
-                        self._candidate021_direct_kv_last_page_len_buf.data_ptr()
+                        self._direct_append_kv_last_page_len_buf.data_ptr()
                     ),
                 },
                 "cache_data_ptrs": [cache.data_ptr() for cache in self.kv_caches],
             }
-            if not self._candidate021_direct_contract[
+            if not self._direct_append_contract[
                 "positions_alias_special_buffer"
             ]:
                 raise RuntimeError(
-                    "Candidate 021C2 special positions must alias direct positions"
+                    "Combined KV append special positions must alias direct positions"
                 )
-            self._candidate021_direct_capture_ready = True
-            self.candidate021_metadata["direct_kv_append_contract"] = {
+            self._direct_append_capture_ready = True
+            self.housekeeping_metadata["direct_kv_append_contract"] = {
                 key: value
-                for key, value in self._candidate021_direct_contract.items()
+                for key, value in self._direct_append_contract.items()
                 if key not in ("buffer_data_ptrs", "cache_data_ptrs")
             }
 
@@ -678,35 +678,35 @@ class FlashInferKVCacheManager(BaseFlashInferKVCacheManager):
         self.visible_plan_calls = 0
         self._kv_indices_buf_in_steady_layout = False
 
-    def _validate_candidate021_direct_manager_buffers(self) -> None:
+    def _validate_direct_append_buffers(self) -> None:
         """Validate stable storage without reading CUDA values or synchronizing."""
-        if not _candidate021_direct_kv_append_enabled(self.candidate021_route):
+        if not _direct_kv_append_enabled(self.housekeeping_mode):
             return
         errors = []
-        contract = self._candidate021_direct_contract
-        if not self._candidate021_direct_capture_ready or not isinstance(contract, dict):
+        contract = self._direct_append_contract
+        if not self._direct_append_capture_ready or not isinstance(contract, dict):
             errors.append("capture-ready contract is missing")
         else:
             tensors = (
                 (
                     "batch",
-                    self._candidate021_direct_batch_indices_buf,
+                    self._direct_append_batch_indices_buf,
                     (self.tokens_per_frame,),
                 ),
                 (
                     "positions",
-                    self._candidate021_direct_positions_buf,
+                    self._direct_append_positions_buf,
                     (self.tokens_per_frame,),
                 ),
                 (
                     "kv_indices",
-                    self._candidate021_direct_kv_indices_buf,
+                    self._direct_append_kv_indices_buf,
                     (1 + self.max_num_pages - self.max_patch_pages,),
                 ),
-                ("kv_indptr", self._candidate021_direct_kv_indptr_buf, (3,)),
+                ("kv_indptr", self._direct_append_kv_indptr_buf, (3,)),
                 (
                     "kv_last_page_len",
-                    self._candidate021_direct_kv_last_page_len_buf,
+                    self._direct_append_kv_last_page_len_buf,
                     (2,),
                 ),
             )
@@ -723,7 +723,7 @@ class FlashInferKVCacheManager(BaseFlashInferKVCacheManager):
                     errors.append(f"{name} storage address changed")
             if (
                 self._special_positions_buf.data_ptr()
-                != self._candidate021_direct_positions_buf.data_ptr()
+                != self._direct_append_positions_buf.data_ptr()
             ):
                 errors.append("special/direct positions alias changed")
             if [cache.data_ptr() for cache in self.kv_caches] != contract[
@@ -732,7 +732,7 @@ class FlashInferKVCacheManager(BaseFlashInferKVCacheManager):
                 errors.append("cache storage address changed")
         if errors:
             raise RuntimeError(
-                "Candidate 021C2 manager buffer contract rejected: "
+                "Combined KV append manager buffer contract rejected: "
                 + "; ".join(errors)
             )
 
@@ -808,7 +808,7 @@ class FlashInferKVCacheManager(BaseFlashInferKVCacheManager):
     def _compute_fa4_attention(self, block_idx: int, q: Tensor) -> Tensor:
         """Run the public FA4 varlen call with the selected cache layout."""
         cache = self.kv_caches[block_idx]
-        if self.candidate021_route is not None:
+        if self.housekeeping_mode is not None:
             expected_shape = (self.tokens_per_frame, self.num_heads, self.head_dim)
             contract_errors = []
             if tuple(q.shape) != expected_shape:
@@ -838,7 +838,7 @@ class FlashInferKVCacheManager(BaseFlashInferKVCacheManager):
                 )
             if contract_errors:
                 raise RuntimeError(
-                    "Candidate 021 FA4 call rejected: "
+                    "Thor FA4 call rejected: "
                     + "; ".join(contract_errors)
                 )
 
@@ -992,7 +992,7 @@ class FlashInferKVCacheManager(BaseFlashInferKVCacheManager):
         if not self._graph_mode:
             raise RuntimeError("prepare_frame_for_graph requires _graph_mode=True")
         self._validate_append_policy()
-        self._validate_candidate021_direct_manager_buffers()
+        self._validate_direct_append_buffers()
 
         sw  = self.sliding_window
         vw  = self.visible_window
@@ -1000,7 +1000,7 @@ class FlashInferKVCacheManager(BaseFlashInferKVCacheManager):
         n_s = self.num_special_tokens
         ps  = self.page_size
 
-        if _candidate021_direct_kv_append_enabled(self.candidate021_route):
+        if _direct_kv_append_enabled(self.housekeeping_mode):
             route_errors = []
             if frame_idx < sf:
                 route_errors.append(
@@ -1008,7 +1008,7 @@ class FlashInferKVCacheManager(BaseFlashInferKVCacheManager):
                 )
             if route_errors:
                 raise RuntimeError(
-                    "Candidate 021C2 graph prepare rejected: "
+                    "Combined KV append graph prepare rejected: "
                     + "; ".join(route_errors)
                 )
 
@@ -1018,8 +1018,8 @@ class FlashInferKVCacheManager(BaseFlashInferKVCacheManager):
         else:
             patch_page_id = sf + ((frame_idx - sf) % sw)     # window cycle
         self._patch_write_page_id_buf[0] = patch_page_id     # async H→D
-        if _candidate021_direct_kv_append_enabled(self.candidate021_route):
-            self._candidate021_direct_kv_indices_buf[0] = patch_page_id
+        if _direct_kv_append_enabled(self.housekeeping_mode):
+            self._direct_append_kv_indices_buf[0] = patch_page_id
 
         # ── 2. Special positions: incremental write via in-place add ────────
         #    base = [0..n_s-1] (pre-baked); add scalar offset → buf.  Single
@@ -1037,11 +1037,11 @@ class FlashInferKVCacheManager(BaseFlashInferKVCacheManager):
         new_total = special_total_before + n_s
         needed_pages = (new_total + ps - 1) // ps
         if (
-            _candidate021_direct_kv_append_enabled(self.candidate021_route)
+            _direct_kv_append_enabled(self.housekeeping_mode)
             and needed_pages > self._special_kv_indices_buf.numel()
         ):
             raise RuntimeError(
-                "Candidate 021C2 special page capacity exceeded: "
+                "Combined KV append special page capacity exceeded: "
                 f"needed_pages={needed_pages}, capacity="
                 f"{self._special_kv_indices_buf.numel()}"
             )
@@ -1062,9 +1062,9 @@ class FlashInferKVCacheManager(BaseFlashInferKVCacheManager):
         if last_sp_len == 0 and n_sp_pages > 0:
             last_sp_len = ps
         self._special_kv_last_page_len_buf[0] = last_sp_len
-        if _candidate021_direct_kv_append_enabled(self.candidate021_route):
-            self._candidate021_direct_kv_indptr_buf[2] = 1 + n_sp_pages
-            self._candidate021_direct_kv_last_page_len_buf[1] = last_sp_len
+        if _direct_kv_append_enabled(self.housekeeping_mode):
+            self._direct_append_kv_indptr_buf[2] = 1 + n_sp_pages
+            self._direct_append_kv_last_page_len_buf[1] = last_sp_len
 
         # ── 5. Visible page table sizing ────────────────────────────────────
         n_active_scale = min(frame_idx + 1, sf)
@@ -1158,13 +1158,13 @@ class FlashInferKVCacheManager(BaseFlashInferKVCacheManager):
         n = self.num_special_tokens
         P = self.patches_per_frame
 
-        if _candidate021_direct_kv_append_enabled(self.candidate021_route):
+        if _direct_kv_append_enabled(self.housekeeping_mode):
             route_errors = []
             if torch.is_grad_enabled():
                 route_errors.append("grad mode must be disabled before cache mutation")
             if not self._graph_mode:
                 route_errors.append("_graph_mode must be true")
-            if not self._candidate021_direct_capture_ready:
+            if not self._direct_append_capture_ready:
                 route_errors.append("capture-ready contract is missing")
             if not isinstance(block_idx, int) or not (0 <= block_idx < self.num_blocks):
                 route_errors.append(
@@ -1172,18 +1172,18 @@ class FlashInferKVCacheManager(BaseFlashInferKVCacheManager):
                 )
             if route_errors:
                 raise RuntimeError(
-                    "Candidate 021C2 graph append rejected: "
+                    "Combined KV append graph append rejected: "
                     + "; ".join(route_errors)
                 )
-            candidate021_direct_append_paged_kv_cache(
+            append_paged_kv_cache(
                 k,
                 v,
                 self.kv_caches[block_idx],
-                self._candidate021_direct_batch_indices_buf,
-                self._candidate021_direct_positions_buf,
-                self._candidate021_direct_kv_indices_buf,
-                self._candidate021_direct_kv_indptr_buf,
-                self._candidate021_direct_kv_last_page_len_buf,
+                self._direct_append_batch_indices_buf,
+                self._direct_append_positions_buf,
+                self._direct_append_kv_indices_buf,
+                self._direct_append_kv_indptr_buf,
+                self._direct_append_kv_last_page_len_buf,
             )
             return
 

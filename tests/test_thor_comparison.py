@@ -1,4 +1,4 @@
-"""Historical whole-frame comparison tests; no dynamic-equivalence claim."""
+"""Streaming synthetic comparison tests with stale-record rejection."""
 import copy
 import io
 import json
@@ -48,10 +48,10 @@ class ThorComparisonTest(unittest.TestCase):
         self.assertIs(wrapper.compare_records, records.compare_records)
         self.assertIs(wrapper.validate_record, records.validate_record)
 
-    def test_equal_outputs_pass_only_as_legacy_whole_frame_scope(self):
+    def test_equal_outputs_pass_in_streaming_synthetic_scope(self):
         result = self.compare()
         self.assertEqual(result["status"], "pass")
-        self.assertEqual(result["scope"], "legacy_whole_frame_synthetic")
+        self.assertEqual(result["scope"], "streaming_synthetic")
         self.assertEqual(result["checked_output_batches"], 12)
         self.assertTrue(result["baseline_repeat_equal"])
         self.assertTrue(result["baseline_optimized_equal"])
@@ -184,11 +184,11 @@ class ThorComparisonTest(unittest.TestCase):
                 records.validate_record(value, correctness=True)
 
     def test_protocol_version_and_capture_scope_are_checked(self):
-        for key, value in (("formal_protocol_version", 4),
-                           ("formal_protocol_version", 2.0),
-                           ("capture_boundary", "aggregator_and_depth_only"),
-                           ("camera_execution", "uncaptured_original_dynamic_history"),
-                           ("temporal_positions", "original_rope_copied_each_frame")):
+        for key, value in (("formal_protocol_version", 2),
+                           ("formal_protocol_version", 4.0),
+                           ("capture_boundary", "whole_frame"),
+                           ("camera_execution", "captured_fixed_python_state"),
+                           ("temporal_positions", "fixed_at_capture")):
             value_record = make_record()
             value_record["result"][9][key] = value
             self.optimized = value_record

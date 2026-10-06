@@ -1,4 +1,4 @@
-"""Compare historical whole-frame synthetic outputs with a stable baseline repeat."""
+"""Compare streaming synthetic outputs with a stable baseline repeat."""
 import argparse
 import json
 from pathlib import Path

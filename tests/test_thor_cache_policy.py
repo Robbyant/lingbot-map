@@ -30,7 +30,7 @@ class ThorCachePolicyTest(unittest.TestCase):
         manager.free_special_pages = [list(range(9, 3, -1))]
         manager.kv_caches = [torch.zeros(10, 2, 7, 1, 2, dtype=manager.dtype)]
         manager._skip_append = manager._defer_eviction = manager._graph_mode = False
-        manager.candidate021_route = None
+        manager.housekeeping_mode = None
         for frame in range(frames):
             k, v = self.frame_tensors(frame)
             manager.append_frame(0, k, v)
@@ -104,8 +104,8 @@ class ThorCachePolicyTest(unittest.TestCase):
                 with self.subTest(route=route, flag=flag):
                     manager = self.make_cache()
                     manager._graph_mode = True
-                    manager.candidate021_route = route
-                    manager._validate_candidate021_direct_manager_buffers = Mock()
+                    manager.housekeeping_mode = route
+                    manager._validate_direct_append_buffers = Mock()
                     manager._patch_write_page_id_buf = torch.tensor([-1])
                     setattr(manager, flag, True)
                     before = self.snapshot(manager)
@@ -113,7 +113,7 @@ class ThorCachePolicyTest(unittest.TestCase):
                         manager.prepare_frame_for_graph(3)
                     self.assert_unchanged(manager, before)
                     self.assertEqual(manager._patch_write_page_id_buf.tolist(), [-1])
-                    manager._validate_candidate021_direct_manager_buffers.assert_not_called()
+                    manager._validate_direct_append_buffers.assert_not_called()
 
     def test_graph_append_rejects_before_cache_writes(self):
         for route in (None, "direct_kv_append"):
@@ -121,7 +121,7 @@ class ThorCachePolicyTest(unittest.TestCase):
                 with self.subTest(route=route, flag=flag):
                     manager = self.make_cache()
                     manager._graph_mode = True
-                    manager.candidate021_route = route
+                    manager.housekeeping_mode = route
                     setattr(manager, flag, True)
                     before = self.snapshot(manager)
                     k, v = self.frame_tensors(3)

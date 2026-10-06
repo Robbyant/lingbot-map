@@ -1,8 +1,7 @@
-"""CPU-only runner setup and historical compatibility checks."""
+"""CPU-only checks for benchmark setup, FP32 positions and isolated sweeps."""
 import os
 import json
 from pathlib import Path
-import runpy
 import subprocess
 import sys
 from types import ModuleType, SimpleNamespace
@@ -93,11 +92,11 @@ print('import-only')
         )
         self.assertEqual(result.stdout.strip(), "import-only")
 
-    def test_manager_receives_rectangular_1005_token_shape_and_historical_capacity(self):
+    def test_shared_manager_receives_rectangular_1005_token_shape_and_capacity(self):
         manager = Mock()
         factory = Mock(return_value=manager)
-        module = ModuleType("tools.thor_legacy_1005.cache")
-        module.HistoricalCache = factory
+        module = ModuleType("lingbot_map.optimizations.thor.cache")
+        module.FlashInferKVCacheManager = factory
         aggregator = SimpleNamespace(
             kv_cache_manager=None, img_size=518, patch_size=14, num_special_tokens=6,
             _thor_options=ThorOptions(), depth=24, embed_dim=1024,
@@ -177,42 +176,6 @@ class HistoricalPositionTest(unittest.TestCase):
         self.assertIs(target.depth_head._apply_pos_embed.__self__, target.depth_head)
         self.assertIs(untouched.depth_head._apply_pos_embed, original_predictor)
         self.assertIs(untouched.aggregator.rope3d.freqs, original_frequencies)
-
-
-class HistoricalCacheTest(unittest.TestCase):
-    def test_constructor_and_reset_restore_descending_eager_allocation(self):
-        class SharedCache:
-            def __init__(self, num_blocks):
-                self.num_blocks = num_blocks
-                self.max_patch_pages, self.max_num_pages = 88, 112
-                self.reset_calls = 0
-                SharedCache.reset(self)
-
-            def reset(self):
-                self.reset_calls += 1
-                self.frame_count = [0] * self.num_blocks
-                self.all_special_pages = [[] for _ in range(self.num_blocks)]
-                self.free_special_pages = [list(range(111, 87, -1)) for _ in range(self.num_blocks)]
-
-        module = ModuleType("lingbot_map.optimizations.thor.cache")
-        module.FlashInferKVCacheManager = SharedCache
-        with patch.dict(sys.modules, {module.__name__: module}):
-            namespace = runpy.run_module("tools.thor_legacy_1005.cache", run_name="cache_cpu_policy_test")
-        cache = namespace["HistoricalCache"](num_blocks=2)
-        self.assertIsInstance(cache, SharedCache)
-        for _ in range(2):
-            self.assertEqual(cache.free_special_pages, [list(range(88, 112))] * 2)
-            self.assertIsNot(cache.free_special_pages[0], cache.free_special_pages[1])
-            self.assertEqual(cache.free_special_pages[0].pop(), 111)
-            cache.frame_count[0] = 8
-            cache.all_special_pages[0].append(111)
-            previous_resets = cache.reset_calls
-            cache.reset()
-            self.assertEqual(cache.reset_calls, previous_resets + 1)
-            self.assertEqual(cache.frame_count, [0, 0])
-            self.assertEqual(cache.all_special_pages, [[], []])
-        shared = SharedCache(num_blocks=1)
-        self.assertEqual(shared.free_special_pages[0].pop(), 88)
 
 
 class LegacySweepTest(unittest.TestCase):

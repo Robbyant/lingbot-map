@@ -1,17 +1,16 @@
-"""CPU-only validation and timing arithmetic for the whole-frame benchmark."""
+"""CPU-only validation and timing arithmetic for the streaming benchmark."""
 import math
 import re
 import statistics
 
 from lingbot_map.optimizations.thor.options import ThorOptions
 
-PROTOCOL_VERSION = 2
-RUNNER_CONTRACT_ID = "thor_legacy_1005_whole_frame_protocol_v3"
-COMPILE_COUNTER_KEYS = (
-    ("frames", "total"), ("stats", "unique_graphs"),
-    ("inductor", "fxgraph_cache_miss"), ("inductor", "fxgraph_cache_bypass"),
-    ("aot_autograd", "total"),
+from .contracts import (
+    COMPILE_COUNTER_KEYS, PROTOCOL_VERSION,
+    validate_capture_depth_contract, validate_replay_contract,
 )
+
+RUNNER_CONTRACT_ID = "thor_1005_streaming_protocol_v4"
 
 
 def require_zero_compile(delta):
@@ -69,27 +68,38 @@ def _validate_input_signature(signature, frames):
 def validate_contract(contract):
     expected = {
         "formal_protocol_version": PROTOCOL_VERSION,
-        "capture_boundary": "whole_frame",
-        "camera_execution": "captured_fixed_python_state",
-        "temporal_positions": "fixed_at_capture",
+        "capture_boundary": "aggregator_and_depth_only",
+        "camera_execution": "uncaptured_original_dynamic_history",
+        "temporal_positions": "original_rope_copied_each_frame",
         "formal_scale_no_recompile": True,
         "formal_warm_no_recompile": True,
         "scale_matches_prewarm": True,
         "warm_frames_match_prewarm": True,
     }
     if not isinstance(contract, dict):
-        raise ValueError("Missing whole-frame capture contract")
+        raise ValueError("Missing streaming capture contract")
     for key, value in expected.items():
         if type(contract.get(key)) is not type(value) or contract[key] != value:
-            raise ValueError(f"Wrong or missing whole-frame contract: {key}")
+            raise ValueError(f"Wrong or missing streaming contract: {key}")
     for key in ("formal_scale_compile_counter_delta", "formal_warm_compile_counter_delta",
                 "replay_compile_counter_delta"):
         require_zero_compile(contract.get(key))
     for key in ("steady_state_prime", "cuda_graph_capture"):
         phase = contract.get(key)
         if (not isinstance(phase, dict) or phase.get("depth_impl") != "compiled"
-                or phase.get("deterministic_algorithms") is not False):
-            raise ValueError(f"Invalid whole-frame {key} contract")
+                or phase.get("deterministic_algorithms") is not True):
+            raise ValueError(f"Invalid streaming {key} contract")
+    validate_capture_depth_contract(contract.get("capture_depth_contract"))
+    signature = contract.get("input_signature")
+    source = signature.get("source") if isinstance(signature, dict) else None
+    shape = source.get("shape") if isinstance(source, dict) else None
+    if not isinstance(shape, list) or len(shape) != 5:
+        raise ValueError("Missing complete streaming input signature")
+    frames = shape[1]
+    if type(frames) is not int or frames < 19:
+        raise ValueError("Invalid streaming input frame count")
+    _validate_input_signature(signature, frames)
+    validate_replay_contract(contract, frames)
 
 
 def _require_finite_samples(values, label):
@@ -101,7 +111,7 @@ def _require_finite_samples(values, label):
 
 def _validate_raw_result(result, frames):
     if not isinstance(result, (list, tuple)) or len(result) != 10:
-        raise ValueError("Missing complete whole-frame result")
+        raise ValueError("Missing complete streaming result")
     gpu, scale, scale_gpu, warm, warm_gpu, scale_wall, warm_wall, wall = result[:8]
     _require_finite_samples(gpu, "GPU replay")
     _require_finite_samples(wall, "host replay")
@@ -148,7 +158,10 @@ def summarize_timing(result, frames):
         "gpu_per_requested_frame": gpu_per_frame,
         "host_replay": summarize_samples(wall), "gpu_replay": summarize_samples(gpu),
         "setup_compile_capture_excluded": True,
-        "host_replay_includes": ["static_input_copy", "cache_preparation", "graph_replay", "synchronize"],
+        "host_replay_includes": [
+            "input_update", "static_input_copy", "position_update", "cache_preparation",
+            "aggregator_graph_replay", "dynamic_camera", "depth_graph_replay", "synchronize",
+        ],
         "output_collection_excluded": True,
     }
 
@@ -248,5 +261,5 @@ def compare_records(baseline, optimized, repeat):
         "frames": baseline["frames"], "checked_output_batches": len(baseline["outputs"]),
         "baseline_repeat_equal": not repeat_diff, "baseline_optimized_equal": not candidate_diff,
         "baseline_repeat_differences": repeat_diff, "baseline_optimized_differences": candidate_diff,
-        "scope": "legacy_whole_frame_synthetic",
+        "scope": "streaming_synthetic",
     }

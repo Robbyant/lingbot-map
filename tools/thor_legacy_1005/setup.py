@@ -1,15 +1,15 @@
-"""Install the historical BF16 benchmark path on a fresh, private model."""
+"""Install the corrected BF16 benchmark path on a fresh, private model."""
 import types
 
 from lingbot_map.optimizations.thor.options import ThorOptions
 
 
 def _get_manager(self, device, dtype, tokens_per_frame=None):
-    from .cache import HistoricalCache
+    from lingbot_map.optimizations.thor.cache import FlashInferKVCacheManager
     if self.kv_cache_manager is None:
         tokens = tokens_per_frame or (self.img_size // self.patch_size) ** 2 + self.num_special_tokens
         self._thor_options.validate(self.kv_cache_sliding_window)
-        self.kv_cache_manager = HistoricalCache(
+        self.kv_cache_manager = FlashInferKVCacheManager(
             num_blocks=self.depth,
             max_num_frames=self.kv_cache_scale_frames + self.kv_cache_sliding_window + 16,
             tokens_per_frame=tokens, num_heads=self.embed_dim // 64, head_dim=64,
@@ -72,7 +72,7 @@ def prepare_model(model, images, options: ThorOptions, *, compile_model=True):
     """Warm the explicit runtime, apply selected options, then optionally compile."""
     import torch
     from lingbot_map.optimizations.thor import weight_cache as weights
-    from lingbot_map.optimizations.thor.projection import apply_candidate021_projection_shadow, validate_candidate021_runtime_route
+    from lingbot_map.optimizations.thor.projection import apply_projection_weight_cache, validate_housekeeping_runtime
     if images.ndim not in (4, 5) or images.shape[-3] != 3:
         raise ValueError("Expected [frames,3,H,W] or [1,frames,3,H,W]")
     if images.ndim == 5 and images.shape[0] != 1:
@@ -88,12 +88,12 @@ def prepare_model(model, images, options: ThorOptions, *, compile_model=True):
     if compile_model:
         patch_compile_camera_trunk(model)
     if options.cache_mlp_weights:
-        stats["patch_mlp_cache"] = vars(weights.apply_candidate002a_patch_mlp_weight_cast_hoist(model))
+        stats["patch_mlp_cache"] = vars(weights.apply_patch_mlp_weight_cache(model))
     if options.cache_qkv_weights:
-        stats["patch_qkv_cache"] = vars(weights.apply_candidate002b2_patch_qkv_weight_cast_hoist(model))
-        stats["global_qkv_cache"] = vars(weights.apply_candidate002b3_gca_qkv_weight_cast_hoist(model))
+        stats["patch_qkv_cache"] = vars(weights.apply_patch_qkv_weight_cache(model))
+        stats["global_qkv_cache"] = vars(weights.apply_global_qkv_weight_cache(model))
     if options.cache_projection_weights:
-        stats["projection_cache"] = vars(apply_candidate021_projection_shadow(model))
+        stats["projection_cache"] = vars(apply_projection_weight_cache(model))
     if images.ndim == 4:
         images = images.unsqueeze(0)
     if images.shape[1] < 19:
@@ -105,10 +105,10 @@ def prepare_model(model, images, options: ThorOptions, *, compile_model=True):
             model(images[:, index:index+1].to(device), num_frame_for_scale=8, num_frame_per_block=1, causal_inference=True)
     torch.cuda.synchronize()
     if options.cache_mlp_weights:
-        stats["global_mlp_cache"] = vars(weights.apply_candidate001_weight_cast_hoist(model))
-        stats["frame_mlp_cache"] = vars(weights.apply_candidate001c_frame_mlp_weight_cast_hoist(model))
+        stats["global_mlp_cache"] = vars(weights.apply_global_mlp_weight_cache(model))
+        stats["frame_mlp_cache"] = vars(weights.apply_frame_mlp_weight_cache(model))
     if options.cache_qkv_weights:
-        stats["frame_qkv_cache"] = vars(weights.apply_candidate002b1_frame_qkv_weight_cast_hoist(model))
+        stats["frame_qkv_cache"] = vars(weights.apply_frame_qkv_weight_cache(model))
     expected_counts = {
         "global_mlp_cache": len(model.aggregator.global_blocks),
         "frame_mlp_cache": len(model.aggregator.frame_blocks),
@@ -125,7 +125,7 @@ def prepare_model(model, images, options: ThorOptions, *, compile_model=True):
         len(model.aggregator.patch_embed.blocks),
     )):
         raise RuntimeError("Incomplete attention projection cache installation")
-    validate_candidate021_runtime_route(model)
+    validate_housekeeping_runtime(model)
     if compile_model:
         from .compile import compile_default
         torch._dynamo.config.recompile_limit = 256

@@ -1,1 +1,1 @@
-"""Isolated historical whole-frame CUDA Graph benchmark; not a demo runtime."""
+"""Streaming synthetic benchmark with static-stage CUDA Graphs; not a demo runtime."""

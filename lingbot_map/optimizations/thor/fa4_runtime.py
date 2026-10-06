@@ -1,6 +1,6 @@
-"""Fail-closed loader for the Candidate 022 FA4 beta15 overlay.
+"""Fail-closed loader for the FA4 beta15 overlay.
 
-Candidate 022 is a process-wide runtime choice because Python and the CuTe DSL
+The FA4 overlay is a process-wide runtime choice because Python and the CuTe DSL
 cache ``flash_attn`` modules and compiled kernels globally.  A process may run
 either the installed FA4 baseline or the vendored beta15 overlay, never both.
 """
@@ -14,7 +14,7 @@ from pathlib import Path
 
 
 ENV_FLAG = "LINGBOT_THOR_FA4_QUERY_STAGING"
-CANDIDATE023_ENV_FLAG = "LINGBOT_THOR_PAGED_KV_AFFINE"
+PAGED_KV_AFFINE_ENV = "LINGBOT_THOR_PAGED_KV_AFFINE"
 EXPECTED_VERSION = "4.0.0b15"
 OVERLAY_ROOT = (
     Path(__file__).resolve().parents[2]
@@ -33,16 +33,16 @@ def _requested_enabled() -> bool:
     return value == "1"
 
 
-def candidate023_pagedkv_requested() -> bool:
-    value = os.environ.get(CANDIDATE023_ENV_FLAG, "")
+def paged_kv_affine_requested() -> bool:
+    value = os.environ.get(PAGED_KV_AFFINE_ENV, "")
     if value not in ("", "0", "1"):
         raise RuntimeError(
-            f"{CANDIDATE023_ENV_FLAG} must be unset, '0', or '1'; got {value!r}"
+            f"{PAGED_KV_AFFINE_ENV} must be unset, '0', or '1'; got {value!r}"
         )
     return value == "1"
 
 
-def candidate022_fa4_b15_enabled() -> bool:
+def fa4_overlay_enabled() -> bool:
     """Return the process-fixed route, rejecting in-process route changes."""
     global _PROCESS_ENABLED
 
@@ -52,7 +52,7 @@ def candidate022_fa4_b15_enabled() -> bool:
     elif _PROCESS_ENABLED is not enabled:
         raise RuntimeError(
             f"{ENV_FLAG} is process-immutable after first use; start a fresh "
-            "process to change the Candidate 022 route"
+            "process to change the FA4 overlay route"
         )
     return enabled
 
@@ -90,27 +90,27 @@ def _remove_failed_overlay_imports(
             sys.modules.pop(name, None)
 
 
-def prepare_candidate022_fa4_b15() -> dict | None:
+def prepare_fa4_overlay() -> dict | None:
     """Select and validate packaged FA4 beta15 before its first import."""
     global _PREPARED_METADATA
 
-    enabled = candidate022_fa4_b15_enabled()
-    candidate023_enabled = candidate023_pagedkv_requested()
-    if candidate023_enabled and not enabled:
+    enabled = fa4_overlay_enabled()
+    paged_kv_affine_enabled = paged_kv_affine_requested()
+    if paged_kv_affine_enabled and not enabled:
         raise RuntimeError(
-            f"{CANDIDATE023_ENV_FLAG}=1 requires {ENV_FLAG}=1"
+            f"{PAGED_KV_AFFINE_ENV}=1 requires {ENV_FLAG}=1"
         )
     overlay_root = Path(OVERLAY_ROOT)
     overlay_text = str(overlay_root.resolve())
     if not enabled:
         if overlay_text in sys.path:
             raise RuntimeError(
-                "Candidate 022 overlay is present in sys.path while its flag is disabled"
+                "FA4 overlay is present in sys.path while its flag is disabled"
             )
         for loaded_path in _loaded_flash_attn_paths():
             if loaded_path.is_relative_to(overlay_root.resolve()):
                 raise RuntimeError(
-                    "Candidate 022 beta15 is already loaded while its flag is disabled; "
+                    "FA4 overlay beta15 is already loaded while its flag is disabled; "
                     "start a fresh process"
                 )
         return None
@@ -119,10 +119,10 @@ def prepare_candidate022_fa4_b15() -> dict | None:
         return dict(_PREPARED_METADATA)
 
     from .options import housekeeping_route
-    candidate021_route = housekeeping_route()
+    housekeeping_mode = housekeeping_route()
 
     if overlay_root.is_symlink():
-        raise RuntimeError(f"Candidate 022 overlay root must not be a symlink: {overlay_root}")
+        raise RuntimeError(f"FA4 overlay root must not be a symlink: {overlay_root}")
     overlay_root = overlay_root.resolve()
     cute_root = overlay_root / "flash_attn" / "cute"
     version_file = overlay_root / "VERSION"
@@ -143,13 +143,13 @@ def prepare_candidate022_fa4_b15() -> dict | None:
     ]
     if invalid_files:
         raise RuntimeError(
-            "Candidate 022 FA4 beta15 overlay is incomplete or non-regular: "
+            "FA4 beta15 overlay is incomplete or non-regular: "
             + ", ".join(invalid_files)
         )
     version = version_file.read_text().strip()
     if version != EXPECTED_VERSION:
         raise RuntimeError(
-            f"Candidate 022 FA4 overlay version={version!r}, "
+            f"FA4 overlay version={version!r}, "
             f"expected {EXPECTED_VERSION!r}"
         )
 
@@ -162,7 +162,7 @@ def prepare_candidate022_fa4_b15() -> dict | None:
         loaded_paths = _loaded_flash_attn_paths()
         observed = str(loaded_paths[0]) if loaded_paths else loaded_names[0]
         raise RuntimeError(
-            "Candidate 022 must select beta15 before flash_attn is imported; "
+            "FA4 overlay must select beta15 before flash_attn is imported; "
             f"already loaded {observed}"
         )
 
@@ -177,7 +177,7 @@ def prepare_candidate022_fa4_b15() -> dict | None:
         interface_path = Path(interface.__file__).resolve()
         if not interface_path.is_relative_to(cute_root):
             raise RuntimeError(
-                "Candidate 022 FA4 source root rejected: "
+                "FA4 source root rejected: "
                 f"observed={interface_path.parent}, expected={cute_root}"
             )
     except Exception:
@@ -190,13 +190,14 @@ def prepare_candidate022_fa4_b15() -> dict | None:
         importlib.invalidate_caches()
         raise
 
+    # Retain diagnostic keys used by existing measurement records.
     _PREPARED_METADATA = {
         "enabled": True,
         "version": version,
         "overlay_root": str(overlay_root),
         "observed_cute_root": str(interface_path.parent),
-        "candidate021_route": candidate021_route,
-        "candidate023_pagedkv_requested": candidate023_enabled,
+        "candidate021_route": housekeeping_mode,
+        "candidate023_pagedkv_requested": paged_kv_affine_enabled,
         "optimization": "sm110_blackwell_q_stage_2",
         "process_route_immutable": True,
         "source_contract": "packaged_vendor_version_and_regular_files",

@@ -591,8 +591,8 @@ For a given output name (e.g. `<scene>` or `<video_name>`):
 ## Optional Thor Inference
 
 Optional SM110 weight-cache, KV-append and FA4 scheduling/addressing changes
-improve the 1000-frame whole-frame CUDA Graph synthetic benchmark from
-**5.145 to 6.844 FPS** at 518 x 378 input. All switches default to off; the
+improve the corrected 1000-frame streaming CUDA Graph synthetic benchmark from
+**5.011 to 6.665 FPS (+33.0%)** at 518 x 378 input. All switches default to off; the
 default model and demo are unchanged. See [setup, benchmark scope and
 reproduction](docs/thor_inference.md).
 

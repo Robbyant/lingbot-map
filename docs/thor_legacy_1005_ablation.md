@@ -1,5 +1,11 @@
 # Thor 1005-Token CUDA Graph Ablation
 
+> Historical fixed-state results, superseded for the corrected streaming
+> benchmark. This run froze camera history and temporal positions at capture
+> and used inconsistent eager/graph special-page allocation. The figures below
+> are retained as a record of that experiment, not as streaming performance.
+> The current harness rejects its old validation records.
+
 Measured on September 13, 2026: **5.145 to 6.844 FPS (+33.0% throughput)** with
 all four lossless groups enabled. The baseline has all six switches off.
 
@@ -37,15 +43,16 @@ Raw time values remain in the [structured measurement record](thor_legacy_1005_a
 so the FPS arithmetic can be checked. Displayed performance uses FPS throughout.
 This synthetic protocol is not a real-input throughput or quality claim.
 
-## Reproduce
+## Historical Reproduction
 
-The isolated checkout entry point is `python -m tools.thor_legacy_1005.run`.
-The [reproduction instructions](thor_inference.md#reproduction) validate outputs
-before running the 1000-frame forward/reverse sweep.
+These results belong to the old whole-frame protocol, not the corrected
+`thor_1005_streaming_protocol_v4` runner. Follow the
+[current instructions](thor_inference.md#reproduction) for streaming validation
+and measurement; do not reuse the figures above for that path.
 
 The validation command collects every output in its configured regression
 length; it does not infer full-sequence equality from timing records alone.
-The current checkout validation used 200 frames and passed all four cumulative
+The historical checkout validation used 200 frames and passed all four cumulative
 configurations with the all-off repeat. The endpoint timing revalidation used
 1000 frames in forward and reverse order and produced 5.146 FPS for all-off and
 6.845 FPS for the full stack, matching the historical headline within 0.03%.

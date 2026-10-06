@@ -1,4 +1,6 @@
 {
+  "status": "historical_fixed_state_not_corrected_streaming",
+  "superseded_reason": "Camera history and temporal positions were fixed at capture; eager and graph special-page allocation did not agree. The corrected streaming runner rejects this protocol.",
   "measurement_date": "2026-09-13",
   "scope": "historical_whole_frame_cuda_graph_synthetic_ablation",
   "protocol": {

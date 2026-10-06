@@ -1,4 +1,4 @@
-"""Compile hot modules before the historical whole-frame CUDA graph."""
+"""Compile hot modules before capturing the static aggregator/depth stages."""
 import torch
 
 

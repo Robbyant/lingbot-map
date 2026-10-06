@@ -26,9 +26,9 @@ class ThorBackendBuffersTest(unittest.TestCase):
         with ExitStack() as stack:
             stack.enter_context(patch.object(cache, "FLASHINFER_AVAILABLE", True))
             stack.enter_context(patch.object(cache, "flashinfer", flashinfer, create=True))
-            stack.enter_context(patch.object(cache, "_resolve_candidate021_route", return_value=None))
-            stack.enter_context(patch.object(cache, "candidate022_fa4_b15_enabled", return_value=False))
-            stack.enter_context(patch.object(cache, "prepare_candidate022_fa4_b15", return_value=None))
+            stack.enter_context(patch.object(cache, "_resolve_housekeeping_route", return_value=None))
+            stack.enter_context(patch.object(cache, "fa4_overlay_enabled", return_value=False))
+            stack.enter_context(patch.object(cache, "prepare_fa4_overlay", return_value=None))
             stack.enter_context(patch.dict(sys.modules, {"flash_attn.cute": cute}))
             for name in ("empty", "zeros", "tensor", "arange"):
                 factory = getattr(torch, name)

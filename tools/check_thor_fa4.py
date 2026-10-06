@@ -12,8 +12,8 @@ def main():
     parser.add_argument("--reference", type=Path)
     args = parser.parse_args()
     ThorOptions(fa4_query_staging=True, paged_kv_affine=args.affine).activate()
-    from lingbot_map.optimizations.thor.fa4_runtime import prepare_candidate022_fa4_b15
-    prepare_candidate022_fa4_b15()
+    from lingbot_map.optimizations.thor.fa4_runtime import prepare_fa4_overlay
+    prepare_fa4_overlay()
     import torch
     from flash_attn.cute.interface import _flash_attn_fwd
     torch.manual_seed(42)

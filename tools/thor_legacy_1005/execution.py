@@ -1,8 +1,4 @@
-"""Historical whole-frame capture protocol for the isolated synthetic benchmark.
-
-Python temporal/camera state is fixed at capture. This is not a live streaming
-runner. Keep these semantics stable when reproducing the published ablation.
-"""
+"""Corrected streaming capture protocol for the Thor synthetic benchmark."""
 from contextlib import contextmanager
 import hashlib
 import os
@@ -11,10 +7,14 @@ import time
 import torch
 
 from lingbot_map.optimizations.thor.projection import (
-    candidate021_projection_shadow_enabled, validate_candidate021_runtime_route,
+    projection_cache_enabled, validate_housekeeping_runtime,
 )
-from .pipeline import forward_pipelined
-from .records import COMPILE_COUNTER_KEYS, PROTOCOL_VERSION
+from .contracts import (
+    COMPILE_COUNTER_KEYS,
+    PROTOCOL_VERSION,
+    validate_capture_depth_contract,
+    validate_replay_contract,
+)
 
 FORMAL_SCALE_FRAMES = 8
 FORMAL_WARM_FRAMES = 10
@@ -29,7 +29,8 @@ def validate_formal_cublas_workspace_unset():
     observed = os.environ.get("CUBLAS_WORKSPACE_CONFIG")
     if observed is not None:
         raise RuntimeError(
-            "formal protocol v2 requires CUBLAS_WORKSPACE_CONFIG unset, "
+            f"formal protocol v{FORMAL_PROTOCOL_VERSION} requires "
+            "CUBLAS_WORKSPACE_CONFIG unset, "
             f"observed {observed!r}"
         )
     return None
@@ -66,6 +67,22 @@ def validate_zero_compile_counter_delta(delta, *, phase):
             f"hitting cache: delta={delta!r}"
         )
     return delta
+
+
+@contextmanager
+def replay_without_recompile():
+    """Keep setup outside timed frames and reject replay-time compilation."""
+    before = compile_counter_snapshot()
+    evidence = {}
+    with torch._dynamo.config.patch(
+        error_on_recompile=True,
+        fail_on_recompile_limit_hit=True,
+    ):
+        yield evidence
+    evidence.update(
+        compile_counter_delta(before, compile_counter_snapshot())
+    )
+    validate_zero_compile_counter_delta(evidence, phase="replay")
 
 
 def formal_input_signature(images):
@@ -468,6 +485,7 @@ def formal_warm_depth_runtime_contract(
     deterministic_restored_before_prime,
     compiled_confirmed_before_prime,
     predict_depth_wrapper_restored_before_prime,
+    capture_depth_contract,
 ):
     """Return stable, address-free metadata for the compiled formal route."""
     if scale_frames != FORMAL_SCALE_FRAMES or warm_frames != FORMAL_WARM_FRAMES:
@@ -591,6 +609,7 @@ def formal_warm_depth_runtime_contract(
             "formal warm-depth contract requires restored deterministic, "
             "compiled-depth, and predictor-wrapper state before frame 18"
         )
+    validate_capture_depth_contract(capture_depth_contract)
     capture_frame = scale_frames + warm_frames
     return {
         "formal_protocol_version": FORMAL_PROTOCOL_VERSION,
@@ -633,10 +652,14 @@ def formal_warm_depth_runtime_contract(
         "formal_scope_enters": (
             scale_depth_route["scope_enters"]
             + warm_depth_route["scope_enters"]
+            + capture_depth_contract["prime"]["scope_enters"]
+            + capture_depth_contract["capture"]["scope_enters"]
         ),
         "formal_scope_restores": (
             scale_depth_route["scope_restores"]
             + warm_depth_route["scope_restores"]
+            + capture_depth_contract["prime"]["scope_restores"]
+            + capture_depth_contract["capture"]["scope_restores"]
         ),
         "warm_toggle_in_timing": True,
         "warm_digest_in_timing": False,
@@ -684,27 +707,32 @@ def formal_warm_depth_runtime_contract(
             "frame18_prime": {
                 "aggregator": False,
                 "camera": False,
-                "depth": False,
+                "depth": True,
             },
             "cuda_graph_capture": {
                 "aggregator": False,
                 "camera": False,
-                "depth": False,
+                "depth": True,
             },
             "graph_replay": {
                 "aggregator": False,
                 "camera": False,
-                "depth": False,
+                "depth": True,
             },
         },
         "steady_state_prime": {
             "depth_impl": "compiled",
-            "deterministic_algorithms": False,
+            "deterministic_algorithms": True,
         },
         "cuda_graph_capture": {
             "depth_impl": "compiled",
-            "deterministic_algorithms": False,
+            "deterministic_algorithms": True,
         },
+        "capture_depth_contract": capture_depth_contract,
+        "replay_determinism_source": (
+            "kernels_selected_under_strict_depth_during_capture"
+        ),
+        "host_deterministic_flag_during_replay": False,
         "phase_tail_digest_snapshot": {
             "scale": "after_phase_sync_before_depth_wrapper_restore",
             "warm_tail": "after_phase_sync_before_depth_wrapper_restore",
@@ -714,10 +742,7 @@ def formal_warm_depth_runtime_contract(
 
 
 def patch_compile_camera_trunk(model):
-    """Compile camera blocks with dynamic cache dimensions during warmup.
-
-    Replay uses the fixed shapes and Python state established at capture.
-    """
+    """Compile camera blocks with dynamic cache dimensions during warmup."""
     if model.camera_head is None:
         return
     for i in range(model.camera_head.trunk_depth):
@@ -747,6 +772,33 @@ def pose_depth_digests(output):
     }
 
 
+def prime_and_capture_depth_route(
+    model,
+    static_input,
+    *,
+    capture_frame,
+    scale_frames,
+    side_stream,
+    dtype,
+    compiled_depth_forward_impl,
+    use_nvtx=False,
+):
+    """Capture static stages while preserving dynamic camera history."""
+    from .streaming_capture import CapturedStreamingStep
+
+    step = CapturedStreamingStep(
+        model,
+        static_input,
+        capture_frame=capture_frame,
+        scale_frames=scale_frames,
+        side_stream=side_stream,
+        dtype=dtype,
+        compiled_depth_forward_impl=compiled_depth_forward_impl,
+        use_nvtx=use_nvtx,
+    )
+    return step, step.output, step.contract
+
+
 def profile_with_capture_camcompile(
     model,
     images,
@@ -766,8 +818,8 @@ def profile_with_capture_camcompile(
         raise RuntimeError(
             "formal protocol requires fail_on_recompile_limit_hit=True"
         )
-    if candidate021_projection_shadow_enabled():
-        validate_candidate021_runtime_route(model)
+    if projection_cache_enabled():
+        validate_housekeeping_runtime(model)
     if compiled_depth_forward_impl is None:
         raise RuntimeError("formal profile requires the compiled depth implementation")
     if not isinstance(deterministic_prewarm, dict):
@@ -968,19 +1020,25 @@ def profile_with_capture_camcompile(
         "(strict deterministic compiled depth only; aggregator/camera disabled)"
     )
 
-    # Retain the side-stream argument used by the historical capture helper.
+    # Camera runs on the side stream; depth waits for it before execution.
     side_stream = torch.cuda.Stream()
     side_stream.wait_stream(torch.cuda.current_stream())
+    probe_head_mode = "serial_camera_then_depth"
     if deterministic_captured_heads:
         print("  Deterministic captured heads enabled: serial_camera_then_depth")
 
     capture_frame = scale_frames + actual_warm
     static_input = images[:, capture_frame:capture_frame+1].to(device).clone()
 
-    g, static_output = capture_whole_frame(
+    g, static_output, capture_depth_contract = prime_and_capture_depth_route(
         model, static_input, capture_frame=capture_frame, scale_frames=scale_frames,
         side_stream=side_stream, dtype=dtype,
         compiled_depth_forward_impl=compiled_depth_forward_impl, use_nvtx=use_nvtx,
+    )
+    print(
+        f"  Captured aggregator/depth at frame {capture_frame} "
+        f"(head_mode={probe_head_mode}, uncaptured dynamic camera, "
+        "strict bf16 depth)"
     )
     warm_depth_contract = formal_warm_depth_runtime_contract(
         scale_frames=scale_frames,
@@ -1005,38 +1063,55 @@ def profile_with_capture_camcompile(
         predict_depth_wrapper_restored_before_prime=(
             predict_depth_wrapper_restored_before_prime
         ),
+        capture_depth_contract=capture_depth_contract,
     )
+    warm_depth_contract["capture_boundary"] = capture_depth_contract[
+        "capture_boundary"
+    ]
+    warm_depth_contract["camera_execution"] = capture_depth_contract[
+        "camera_execution"
+    ]
+    warm_depth_contract["temporal_positions"] = capture_depth_contract[
+        "temporal_positions"
+    ]
 
     per_frame_ms = []
     per_frame_wall_ms = []
     measure_start = capture_frame
-    replay_counters_before = compile_counter_snapshot()
-    for f in range(measure_start, S):
-        replay_wall_start = time.perf_counter()
-        static_input.copy_(images[:, f:f+1].to(device, non_blocking=True))
-        manager.prepare_frame_for_graph(f)
-        start_ev.record()
-        if use_nvtx:
-            torch.cuda.nvtx.range_push(f"replay_{f}")
-        g.replay()
-        if use_nvtx:
-            torch.cuda.nvtx.range_pop()
-        end_ev.record()
-        torch.cuda.synchronize()
-        per_frame_ms.append(start_ev.elapsed_time(end_ev))
-        per_frame_wall_ms.append((time.perf_counter() - replay_wall_start) * 1000.0)
-        if output_collector is not None:
-            output_collector(f, static_output)
+    with replay_without_recompile() as replay_compile_delta:
+        for f in range(measure_start, S):
+            replay_wall_start = time.perf_counter()
+            static_input.copy_(images[:, f:f+1].to(device, non_blocking=True))
+            g.prepare(f)
+            start_ev.record()
+            if use_nvtx:
+                torch.cuda.nvtx.range_push(f"replay_{f}")
+            g.replay()
+            if use_nvtx:
+                torch.cuda.nvtx.range_pop()
+            end_ev.record()
+            torch.cuda.synchronize()
+            per_frame_ms.append(start_ev.elapsed_time(end_ev))
+            per_frame_wall_ms.append(
+                (time.perf_counter() - replay_wall_start) * 1000.0
+            )
+            if output_collector is not None:
+                output_collector(f, static_output)
 
-    warm_depth_contract["replay_compile_counter_delta"] = compile_counter_delta(
-        replay_counters_before, compile_counter_snapshot(),
+    warm_depth_contract["replay_compile_counter_delta"] = dict(
+        replay_compile_delta
     )
-    validate_zero_compile_counter_delta(
-        warm_depth_contract["replay_compile_counter_delta"], phase="replay",
-    )
-    warm_depth_contract["capture_boundary"] = "whole_frame"
-    warm_depth_contract["camera_execution"] = "captured_fixed_python_state"
-    warm_depth_contract["temporal_positions"] = "fixed_at_capture"
+    warm_depth_contract["completed_streaming_state"] = {
+        "aggregator_frames": model.aggregator.total_frames_processed,
+        "camera_frames": model.camera_head.frame_idx,
+        "replayed_frames": g.next_frame - measure_start,
+        "camera_cache_lengths": [
+            int(cache[f"k_{block}"].shape[2])
+            for cache in model.camera_head.kv_cache
+            for block in range(model.camera_head.trunk_depth)
+        ],
+    }
+    validate_replay_contract(warm_depth_contract, S)
 
     phase_output_digests = {
         "scale": scale_output_digests,
@@ -1055,43 +1130,3 @@ def profile_with_capture_camcompile(
         phase_output_digests,
         warm_depth_contract,
     )
-
-
-def capture_whole_frame(
-    model, static_input, *, capture_frame, scale_frames, side_stream, dtype,
-    compiled_depth_forward_impl, use_nvtx=False,
-):
-    """Preserve the measured whole-frame prime/capture, including Python state.
-
-    Strict depth applies to scale and warm only in this protocol. Changing
-    capture determinism or moving camera outside the graph changes the workload.
-    """
-    manager = model.aggregator.kv_cache_manager
-    assert_compiled_nondeterministic_route(
-        model, compiled_depth_forward_impl, phase="whole-frame prime entry",
-    )
-
-    def forward(nvtx):
-        return forward_pipelined(
-            model, static_input, side_stream=side_stream,
-            num_frame_for_scale=scale_frames, num_frame_per_block=1,
-            causal_inference=True, use_nvtx=nvtx,
-            probe_head_mode="serial_camera_then_depth",
-        )
-
-    manager.prepare_frame_for_graph(capture_frame)
-    with torch.no_grad(), torch.amp.autocast("cuda", dtype=dtype):
-        forward(False)
-    torch.cuda.synchronize()
-    manager.prepare_frame_for_graph(capture_frame)
-    model.aggregator._nvtx_profile = bool(use_nvtx)
-    manager._nvtx_profile = bool(use_nvtx)
-    assert_compiled_nondeterministic_route(
-        model, compiled_depth_forward_impl, phase="whole-frame capture entry",
-    )
-    graph = torch.cuda.CUDAGraph()
-    with torch.no_grad(), torch.amp.autocast("cuda", dtype=dtype):
-        with torch.cuda.graph(graph):
-            output = forward(use_nvtx)
-    torch.cuda.synchronize()
-    return graph, output

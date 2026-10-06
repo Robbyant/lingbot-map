@@ -75,10 +75,10 @@ class ThorOptionsTest(unittest.TestCase):
         self.assertTrue((overlay / "flash_attn/__init__.py").is_file())
 
     def test_cache_and_append_shape_contracts_agree(self):
-        from lingbot_map.optimizations.thor.cache import CANDIDATE021_ALLOWED_TOKENS_PER_FRAME
+        from lingbot_map.optimizations.thor.cache import SUPPORTED_TOKENS_PER_FRAME
         from lingbot_map.optimizations.thor.kv_append import ALLOWED_TOKENS_PER_FRAME
 
-        self.assertEqual(CANDIDATE021_ALLOWED_TOKENS_PER_FRAME, ALLOWED_TOKENS_PER_FRAME)
+        self.assertEqual(SUPPORTED_TOKENS_PER_FRAME, ALLOWED_TOKENS_PER_FRAME)
         self.assertIn(1005, ALLOWED_TOKENS_PER_FRAME)
         self.assertNotIn(1004, ALLOWED_TOKENS_PER_FRAME)
         self.assertNotIn(1006, ALLOWED_TOKENS_PER_FRAME)

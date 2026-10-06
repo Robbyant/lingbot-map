@@ -1,7 +1,7 @@
 # Thor Inference Optimizations
 
-Four opt-in optimization groups improve the historical 1000-frame whole-frame
-CUDA Graph benchmark from **5.145 to 6.844 FPS (+33.0%)** on NVIDIA Thor.
+Four opt-in optimization groups reduce BF16 weight preparation, KV writes and
+FA4 data-loading overhead on NVIDIA Thor.
 The input is **518 x 378 (width x height), 1005 tokens/frame**, batch size one.
 
 The optimization modules and benchmark are separate from the default model,
@@ -24,35 +24,33 @@ training code and demo. No option is enabled by importing the package.
 
 ## Performance
 
-| Cumulative configuration | FPS | Gain over previous row |
-|---|---:|---:|
-| All options off | 5.145 | - |
-| + MLP/QKV weight caching | 5.762 | +12.0% |
-| + Projection caching and combined KV append | 5.828 | +1.2% |
-| + FA4 dual-stage Query staging | 6.687 | +14.7% |
-| + Single-page KV addressing | **6.844** | **+2.3%** |
+The corrected 1000-frame endpoint comparison improves from **5.011 to
+6.665 FPS (+33.0%)**, with all six optimization switches enabled together.
 
-The combined throughput gain is **33.0%**. Rows are cumulative; the incremental
-percentages are not additive. See the [measurement record](thor_legacy_1005_ablation.md)
-for repetitions, timing boundaries and machine-readable results.
-
-The checked-in harness independently revalidated the endpoint pair at 5.146 and
-6.845 FPS using the same protocol; both values are within 0.03% of the
-historical 5.145 and 6.844 FPS record.
+See the [corrected streaming measurement report](thor_streaming_1005_benchmark.md)
+for the current all-off/full-stack comparison. The previous
+[fixed-state ablation](thor_legacy_1005_ablation.md) is retained as historical
+evidence only; its FPS figures do not apply to the corrected streaming path.
 
 ### Benchmark Contract
 
-Both arms use the same historical BF16 path, random weights, four camera
+Both arms use the same BF16 path, random weights, four camera
 refinement iterations, and enabled camera/depth heads. There are eight scale
-frames, ten streaming warmup frames and 982 whole-frame graph replays.
-Input update, cache preparation and synchronization are included; construction,
-compilation, rehearsal, capture and output collection are excluded.
+frames, ten streaming warmup frames and 982 measured streaming steps.
+Each step updates the input, temporal RoPE positions and cache page table,
+replays the aggregator graph, runs the original camera with growing history,
+then replays the depth graph. Input/cache/position updates, both graphs,
+camera execution and synchronization are timed. Construction, compilation,
+rehearsal, capture and output collection are excluded.
 
-The isolated harness preserves capture-fixed Python camera/temporal state,
-the historical special-page handoff and FP32 position arithmetic in both arms.
-These are synthetic ablation results, not default-demo throughput or a
-real-sequence reconstruction-quality evaluation. "Lossless" compares the
-optimization switches against this same all-off BF16 benchmark baseline.
+Scale writes and graph reads use the shared cache manager's special-page
+allocation. Capture does not consume a camera frame. Depth uses strict
+deterministic compiled kernels in every phase; original FP32 parameters and
+position arithmetic are retained. This workload appends every frame, without
+dynamic keyframe selection.
+
+These are synthetic results, not default-demo throughput or a real-sequence
+reconstruction-quality evaluation.
 
 ## Environment
 
@@ -68,7 +66,7 @@ FA4 beta14 is the installed reference. The Query-staging option selects the
 packaged beta15 implementation before its first import. Use a fresh process
 when changing FA4 or optimization options.
 
-## Independent Switches
+## Switches
 
 | Switch | Purpose |
 |---|---|
@@ -80,7 +78,7 @@ when changing FA4 or optimization options.
 | `--paged-kv-affine` | Single-page addressing; requires Query staging |
 
 All six switches default to off. The optional `--visible-window 56` additionally
-requires `--allow-approximate`; it is not part of the lossless result above.
+requires `--allow-approximate`; it is not part of the lossless comparison.
 It changes attention visibility, not the physical 64-page patch allocation.
 The Thor runtime appends every frame. Dynamic keyframes, deferred eviction and
 rollback are unsupported and raise an error before modifying the cache.
@@ -93,13 +91,13 @@ Its input dimensions, seed, head configuration and capture protocol are fixed.
 
 ### Short Reproduction
 
-This command runs a discarded preflight, all-off reference, four cumulative
-optimized configurations and an all-off repeat in separate processes. The
-default regression length is 200 frames, including 182 graph replays.
+This command runs a discarded preflight, all-off reference, full stack and an
+all-off repeat in separate processes. The default regression length is 200
+frames, including 182 streaming steps using the captured static stages.
 
 ```bash
 python -m tools.thor_legacy_1005.sweep validate \
-  --out-dir /tmp/thor-ablation
+  --scope endpoints --out-dir /tmp/thor-streaming
 ```
 
 It compares pose/depth for every collected scale, warm and replay output,
@@ -107,8 +105,8 @@ checks finiteness, verifies unchanged FP32 parameters and checkpoint keys,
 and rejects incomplete, stale, or unstable reference records. Every validation
 record carries the runner contract identifier and expected frame count, so a
 benchmark cannot consume results from a different runner or workload.
-Validation is specific to the isolated whole-frame protocol. It is not an
-uncaptured streaming check.
+Records also require complete camera/aggregator progress and zero compilation
+during measured execution. Old fixed-state records are rejected.
 
 ### 1000-Frame Timing
 
@@ -117,7 +115,7 @@ order. The command rechecks the validation records before starting any timing.
 
 ```bash
 python -m tools.thor_legacy_1005.sweep benchmark \
-  --out-dir /tmp/thor-ablation
+  --scope endpoints --out-dir /tmp/thor-streaming
 ```
 
 Each child process explicitly sets its switches, clears inherited experimental
@@ -125,7 +123,8 @@ flags and enables the FA4 compile cache. Logs, commands, raw timings and output
 comparisons are retained in the output directory. Existing runs are never
 overwritten. Use a new directory for another campaign.
 
-For just the all-off/full-stack pair, pass `--scope endpoints` to both commands.
+For all four cumulative optimization groups, use `--scope ablation` for both
+commands in a new output directory.
 For a single diagnostic run:
 
 ```bash
@@ -143,8 +142,8 @@ python -m unittest discover -s tests -p 'test_thor*.py' -v
 ```
 
 The tests cover option isolation, unsupported shapes, append/cache behavior,
-whole-frame capture control flow and rejection of invalid timing/comparison
-records. GPU tests require the Thor environment. The separate FA4 checker also
+static-stage capture, dynamic streaming state and rejection of invalid
+timing/comparison records. GPU tests require the Thor environment. The separate FA4 checker also
 compares captured kernel outputs with its reference across supported shapes.
 
 ## Rollback

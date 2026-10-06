@@ -42,7 +42,7 @@ class ThorGpuTest(unittest.TestCase):
     @torch.no_grad()
     def test_combined_append_rejects_unaudited_shapes_and_layouts(self):
         from lingbot_map.optimizations.thor.kv_append import (
-            validate_candidate021_direct_append_call,
+            validate_direct_append_call,
         )
 
         def arguments(tokens):
@@ -60,16 +60,16 @@ class ThorGpuTest(unittest.TestCase):
         for tokens in (1004, 1006):
             with self.subTest(tokens=tokens):
                 with self.assertRaisesRegex(RuntimeError, "tokens_per_frame"):
-                    validate_candidate021_direct_append_call(*arguments(tokens))
+                    validate_direct_append_call(*arguments(tokens))
         args = arguments(1005)
-        validate_candidate021_direct_append_call(*args)
+        validate_direct_append_call(*args)
         for invalid in (
             torch.empty(1005, 16, 64, device="cuda", dtype=torch.float32),
             torch.empty(1005, 16, 128, device="cuda", dtype=torch.bfloat16)[..., ::2],
         ):
             with self.subTest(dtype=invalid.dtype, stride=invalid.stride()):
                 with self.assertRaisesRegex(RuntimeError, r"k\.(dtype|stride)"):
-                    validate_candidate021_direct_append_call(invalid, *args[1:])
+                    validate_direct_append_call(invalid, *args[1:])
 
     @torch.no_grad()
     def test_public_fa4_dispatch_preserves_tensor_contract(self):
@@ -81,7 +81,7 @@ class ThorGpuTest(unittest.TestCase):
                       "projection_shadow_direct_kv_append"):
             call = Mock(return_value=(result, None))
             manager = types.SimpleNamespace(
-                candidate021_route=route, tokens_per_frame=783, num_heads=16,
+                housekeeping_mode=route, tokens_per_frame=783, num_heads=16,
                 head_dim=64, dtype=torch.bfloat16, max_num_pages=2,
                 kv_caches=[cache], _fa4_flash_attn_varlen_func=call,
                 _fa4_cu_q_gpu=torch.tensor([0, 783], dtype=torch.int32, device="cuda"),
@@ -207,7 +207,7 @@ class ThorGpuTest(unittest.TestCase):
         weight_cache._refresh_mlp_shadow_buffers(block.mlp)
         with torch.amp.autocast("cuda", dtype=torch.bfloat16):
             expected = blocks.attn_post_ffn(block, x, out)
-            actual = weight_cache._candidate_attn_post_ffn(block, x, out)
+            actual = weight_cache._global_mlp_cached_forward(block, x, out)
         self.assertTrue(torch.equal(expected, actual))
         self.assertEqual(set(state_before), set(block.state_dict()))
         for name, tensor in block.state_dict().items():
@@ -216,9 +216,9 @@ class ThorGpuTest(unittest.TestCase):
     @torch.no_grad()
     def test_combined_append_matches_payload_across_wraps(self):
         from lingbot_map.optimizations.thor.kv_append import (
-            candidate021_direct_append_paged_kv_cache, validate_candidate021_direct_append_runtime,
+            append_paged_kv_cache, validate_direct_append_runtime,
         )
-        validate_candidate021_direct_append_runtime()
+        validate_direct_append_runtime()
         page, special, window, scale = 777, 6, 2, 8
         cache = torch.zeros(15, 2, page, 16, 64, dtype=torch.bfloat16, device="cuda")
         expected = torch.zeros_like(cache)
@@ -238,7 +238,7 @@ class ThorGpuTest(unittest.TestCase):
             last[1] = special_total % page or page
             k = torch.randn(page + special, 16, 64, device="cuda", dtype=torch.bfloat16)
             v = torch.randn_like(k)
-            candidate021_direct_append_paged_kv_cache(k, v, cache, batch, positions, indices, indptr, last)
+            append_paged_kv_cache(k, v, cache, batch, positions, indices, indptr, last)
             expected[patch_id, 0].copy_(k[special:])
             expected[patch_id, 1].copy_(v[special:])
             for slot in range(special):

@@ -9,12 +9,12 @@ from lingbot_map.optimizations.thor import blocks, weight_cache
 
 
 INSTALLERS = (
-    (weight_cache.apply_candidate001_weight_cast_hoist, 4),
-    (weight_cache.apply_candidate001c_frame_mlp_weight_cast_hoist, 4),
-    (weight_cache.apply_candidate002a_patch_mlp_weight_cast_hoist, 4),
-    (weight_cache.apply_candidate002b1_frame_qkv_weight_cast_hoist, 2),
-    (weight_cache.apply_candidate002b2_patch_qkv_weight_cast_hoist, 2),
-    (weight_cache.apply_candidate002b3_gca_qkv_weight_cast_hoist, 2),
+    (weight_cache.apply_global_mlp_weight_cache, 4),
+    (weight_cache.apply_frame_mlp_weight_cache, 4),
+    (weight_cache.apply_patch_mlp_weight_cache, 4),
+    (weight_cache.apply_frame_qkv_weight_cache, 2),
+    (weight_cache.apply_patch_qkv_weight_cache, 2),
+    (weight_cache.apply_global_qkv_weight_cache, 2),
 )
 
 
@@ -45,6 +45,32 @@ class ThorWeightCacheTest(unittest.TestCase):
                 for name, param in model.state_dict().items():
                     self.assertEqual(param.dtype, torch.float32)
                     self.assertTrue(torch.equal(param, original[name]), name)
+
+    def test_combined_caches_keep_distinct_original_forward_links(self):
+        for scope in ("frame", "patch"):
+            for order in (("mlp", "qkv"), ("qkv", "mlp")):
+                with self.subTest(scope=scope, order=order):
+                    model = self.make_model()
+                    agg = model.aggregator
+                    block = (agg.frame_blocks if scope == "frame" else agg.patch_embed.blocks)[0]
+                    originals = {}
+                    for kind in order:
+                        originals[kind] = block.forward
+                        install = getattr(weight_cache, f"apply_{scope}_{kind}_weight_cache")
+                        install(model)
+                        self.assertEqual(
+                            getattr(block, f"_{scope}_{kind}_original_forward"),
+                            originals[kind],
+                        )
+                    self.assertNotEqual(originals["mlp"], originals["qkv"])
+                    for kind in order:
+                        install = getattr(weight_cache, f"apply_{scope}_{kind}_weight_cache")
+                        self.assertEqual(install(model).buffers_registered, 0)
+                        self.assertTrue(getattr(block, f"_{scope}_{kind}_weight_cache_enabled"))
+                        self.assertEqual(
+                            getattr(block, f"_{scope}_{kind}_original_forward"),
+                            originals[kind],
+                        )
 
     def test_missing_blocks_return_empty_stats(self):
         for install, _ in INSTALLERS:

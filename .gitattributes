@@ -1,0 +1,5 @@
+# Separate pinned upstream sources from the three locally modified files.
+lingbot_map/_vendor/flash_attn_4_0_0b15/** linguist-vendored=true
+lingbot_map/_vendor/flash_attn_4_0_0b15/flash_attn/cute/interface.py linguist-vendored=false
+lingbot_map/_vendor/flash_attn_4_0_0b15/flash_attn/cute/flash_fwd_sm100.py linguist-vendored=false
+lingbot_map/_vendor/flash_attn_4_0_0b15/flash_attn/cute/paged_kv.py linguist-vendored=false

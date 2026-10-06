@@ -1,7 +1,7 @@
-"""Run the isolated 1005-token, whole-frame CUDA Graph synthetic benchmark.
+"""Run the 1005-token streaming synthetic benchmark with static-stage CUDA Graphs.
 
 Use from the repository root: python -m tools.thor_legacy_1005.run --help
-No checkpoint is loaded. This is not the default demo or a live-stream runner.
+No checkpoint is loaded. This is a synthetic workload, not demo throughput.
 """
 import argparse
 import importlib.metadata
@@ -77,7 +77,7 @@ def main(argv=None):
 
     parameters = parameter_state()
     state_keys = checkpoint_keys()
-    print("Preparing historical BF16 path and three unmeasured rehearsals", flush=True)
+    print("Preparing BF16 streaming path and three unmeasured rehearsals", flush=True)
     stats = prepare_model(model, images, options)
     depth_impl = model.depth_head._forward_impl
     prewarm = prewarm_compiled_strict_depth_only_formal_route(
@@ -91,7 +91,7 @@ def main(argv=None):
             raise RuntimeError(f"Nonfinite output at frame {index}")
         outputs.append({"frame_index": index, **values})
 
-    print("Timing whole-frame replay" if args.benchmark else "Checking whole-frame outputs", flush=True)
+    print("Timing streaming frames" if args.benchmark else "Checking streaming outputs", flush=True)
     result = profile_with_capture_camcompile(
         model, images, args.frames, torch.bfloat16,
         deterministic_captured_heads=True, compiled_depth_forward_impl=depth_impl,
@@ -123,7 +123,7 @@ def main(argv=None):
         json.dump(report, output, indent=2)
         output.write("\n")
     if args.benchmark:
-        print(f"Whole-frame synthetic throughput: {report['timing']['fps']:.3f} FPS", flush=True)
+        print(f"Streaming synthetic throughput: {report['timing']['fps']:.3f} FPS", flush=True)
     print(f"Wrote {args.out}", flush=True)
 
 

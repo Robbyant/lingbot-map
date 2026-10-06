@@ -65,13 +65,13 @@ class CacheHandoffCase(unittest.TestCase):
 
     @torch.no_grad()
     def test_captured_history_wrap_and_reset(self):
-        from lingbot_map.optimizations.thor.projection import validate_candidate021_runtime_route
+        from lingbot_map.optimizations.thor.projection import validate_housekeeping_runtime
 
         manager = self.manager
         model = types.SimpleNamespace(
             aggregator=types.SimpleNamespace(kv_cache_manager=manager),
         )
-        validate_candidate021_runtime_route(model)
+        validate_housekeeping_runtime(model)
         page, special = manager.page_size, manager.num_special_tokens
         # Check the first and last layer, including every token/head/component.
         checked_blocks = (0, manager.num_blocks - 1)

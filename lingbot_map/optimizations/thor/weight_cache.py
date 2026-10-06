@@ -52,18 +52,18 @@ def _refresh_qkv_shadow_buffers(attn) -> int:
     return buffers_registered
 
 
-def _candidate_qkv_linear(attn, x):
+def _cached_qkv_linear(attn, x):
     return F.linear(x, attn.qkv_weight_bf16, attn.qkv_bias_bf16)
 
 
-def _candidate002b3_qkv_forward(qkv, x):
-    attn = qkv._candidate002b3_attn_owner_ref()
+def _global_qkv_cached_forward(qkv, x):
+    attn = qkv._qkv_cache_owner_ref()
     if attn is None:
-        raise RuntimeError("Candidate 002B-3 attention owner was released")
+        raise RuntimeError("Global QKV cache attention owner was released")
     return F.linear(x, attn.qkv_weight_bf16, attn.qkv_bias_bf16)
 
 
-def _candidate_attn_post_ffn(self, x, attn_out):
+def _global_mlp_cached_forward(self, x, attn_out):
     x = self.attn_post(x, attn_out)
     y = self.norm2(x)
     mlp = self.mlp
@@ -75,7 +75,7 @@ def _candidate_attn_post_ffn(self, x, attn_out):
     return x + self.ls2(y)
 
 
-def _candidate001c_frame_block_forward(
+def _frame_mlp_cached_forward(
     self,
     x,
     pos=None,
@@ -86,7 +86,7 @@ def _candidate001c_frame_block_forward(
     enable_3d_rope=False,
 ):
     if self.training:
-        return self._candidate001c_original_forward(
+        return self._frame_mlp_original_forward(
             x,
             pos=pos,
             num_patches=num_patches,
@@ -95,7 +95,7 @@ def _candidate001c_frame_block_forward(
             enable_3d_rope=enable_3d_rope,
         )
 
-    qkv = getattr(self.attn, "_candidate002b1_qkv_linear", None)
+    qkv = getattr(self.attn, "_frame_cached_qkv_linear", None)
     if qkv is None:
         attn_out = self.attn(
             self.norm1(x),
@@ -130,7 +130,7 @@ def _candidate001c_frame_block_forward(
     return x + self.ls2(y)
 
 
-def _candidate002a_patch_block_forward(
+def _patch_mlp_cached_forward(
     self,
     x,
     pos=None,
@@ -141,7 +141,7 @@ def _candidate002a_patch_block_forward(
     enable_3d_rope=False,
 ):
     if self.training:
-        return self._candidate002a_original_forward(
+        return self._patch_mlp_original_forward(
             x,
             pos=pos,
             num_patches=num_patches,
@@ -171,7 +171,7 @@ def _candidate002a_patch_block_forward(
     return x + self.ls2(y)
 
 
-def _candidate002b2_patch_block_forward(
+def _patch_qkv_cached_forward(
     self,
     x,
     pos=None,
@@ -182,7 +182,7 @@ def _candidate002b2_patch_block_forward(
     enable_3d_rope=False,
 ):
     if self.training:
-        return self._candidate002b2_original_forward(
+        return self._patch_qkv_original_forward(
             x,
             pos=pos,
             num_patches=num_patches,
@@ -191,7 +191,7 @@ def _candidate002b2_patch_block_forward(
             enable_3d_rope=enable_3d_rope,
         )
 
-    qkv = self.attn._candidate002b2_qkv_linear
+    qkv = self.attn._patch_cached_qkv_linear
     x = x + self.ls1(
         self.attn.forward_with_qkv_linear(
             self.norm1(x),
@@ -204,7 +204,7 @@ def _candidate002b2_patch_block_forward(
         )
     )
 
-    if hasattr(self, "_candidate002a_patch_mlp_weight_cast_hoist"):
+    if hasattr(self, "_patch_mlp_weight_cache_enabled"):
         mlp = self.mlp
         y = self.norm2(x)
         y = F.linear(y, mlp.fc1_weight_bf16, mlp.fc1_bias_bf16)
@@ -217,7 +217,7 @@ def _candidate002b2_patch_block_forward(
     return x + self.ls2(self.mlp(self.norm2(x)))
 
 
-def _candidate002b1_frame_block_forward(
+def _frame_qkv_cached_forward(
     self,
     x,
     pos=None,
@@ -228,7 +228,7 @@ def _candidate002b1_frame_block_forward(
     enable_3d_rope=False,
 ):
     if self.training:
-        return self._candidate002b1_original_forward(
+        return self._frame_qkv_original_forward(
             x,
             pos=pos,
             num_patches=num_patches,
@@ -237,7 +237,7 @@ def _candidate002b1_frame_block_forward(
             enable_3d_rope=enable_3d_rope,
         )
 
-    qkv = self.attn._candidate002b1_qkv_linear
+    qkv = self.attn._frame_cached_qkv_linear
     x = x + self.ls1(
         self.attn.forward_with_qkv_linear(
             self.norm1(x),
@@ -250,7 +250,7 @@ def _candidate002b1_frame_block_forward(
         )
     )
 
-    if hasattr(self, "_candidate001c_frame_mlp_weight_cast_hoist"):
+    if hasattr(self, "_frame_mlp_weight_cache_enabled"):
         mlp = self.mlp
         y = self.norm2(x)
         y = F.linear(y, mlp.fc1_weight_bf16, mlp.fc1_bias_bf16)
@@ -279,8 +279,8 @@ def _iter_patch_embed_blocks(model):
     return flattened
 
 
-def apply_candidate001_weight_cast_hoist(model) -> WeightCacheStats:
-    """Patch GCA global blocks for Candidate 001B.
+def apply_global_mlp_weight_cache(model) -> WeightCacheStats:
+    """Cache BF16 MLP parameters in global attention blocks.
 
     The original fp32 parameters remain untouched.  Shadow buffers are marked
     ``persistent=False`` so they do not affect checkpoint or state_dict behavior.
@@ -299,8 +299,8 @@ def apply_candidate001_weight_cast_hoist(model) -> WeightCacheStats:
         if not (hasattr(mlp, "fc1") and hasattr(mlp, "fc2")):
             continue
         buffers_registered += _refresh_mlp_shadow_buffers(mlp)
-        block.attn_post_ffn = types.MethodType(_candidate_attn_post_ffn, block)
-        block._candidate001_weight_cast_hoist = True
+        block.attn_post_ffn = types.MethodType(_global_mlp_cached_forward, block)
+        block._global_mlp_weight_cache_enabled = True
         blocks_patched += 1
 
     return WeightCacheStats(
@@ -309,8 +309,8 @@ def apply_candidate001_weight_cast_hoist(model) -> WeightCacheStats:
     )
 
 
-def apply_candidate001c_frame_mlp_weight_cast_hoist(model) -> WeightCacheStats:
-    """Patch frame-attention block MLPs for Candidate 001C.
+def apply_frame_mlp_weight_cache(model) -> WeightCacheStats:
+    """Cache BF16 MLP parameters in frame-attention blocks.
 
     The original fp32 parameters remain untouched.  Shadow buffers are marked
     ``persistent=False`` so they do not affect checkpoint or state_dict behavior.
@@ -327,10 +327,10 @@ def apply_candidate001c_frame_mlp_weight_cast_hoist(model) -> WeightCacheStats:
         if mlp is None or not (hasattr(mlp, "fc1") and hasattr(mlp, "fc2")):
             continue
         buffers_registered += _refresh_mlp_shadow_buffers(mlp)
-        if not hasattr(block, "_candidate001c_original_forward"):
-            block._candidate001c_original_forward = block.forward
-        block.forward = types.MethodType(_candidate001c_frame_block_forward, block)
-        block._candidate001c_frame_mlp_weight_cast_hoist = True
+        if not hasattr(block, "_frame_mlp_original_forward"):
+            block._frame_mlp_original_forward = block.forward
+        block.forward = types.MethodType(_frame_mlp_cached_forward, block)
+        block._frame_mlp_weight_cache_enabled = True
         blocks_patched += 1
 
     return WeightCacheStats(
@@ -339,8 +339,8 @@ def apply_candidate001c_frame_mlp_weight_cast_hoist(model) -> WeightCacheStats:
     )
 
 
-def apply_candidate002a_patch_mlp_weight_cast_hoist(model) -> WeightCacheStats:
-    """Patch patch_embed DINO/ViT block MLPs for Candidate 002A.
+def apply_patch_mlp_weight_cache(model) -> WeightCacheStats:
+    """Cache BF16 MLP parameters in patch-embedding DINO/ViT blocks.
 
     The original fp32 parameters remain untouched.  Shadow buffers are marked
     ``persistent=False`` so they do not affect checkpoint or state_dict behavior.
@@ -352,10 +352,10 @@ def apply_candidate002a_patch_mlp_weight_cast_hoist(model) -> WeightCacheStats:
         if mlp is None or not (hasattr(mlp, "fc1") and hasattr(mlp, "fc2")):
             continue
         buffers_registered += _refresh_mlp_shadow_buffers(mlp)
-        if not hasattr(block, "_candidate002a_original_forward"):
-            block._candidate002a_original_forward = block.forward
-        block.forward = types.MethodType(_candidate002a_patch_block_forward, block)
-        block._candidate002a_patch_mlp_weight_cast_hoist = True
+        if not hasattr(block, "_patch_mlp_original_forward"):
+            block._patch_mlp_original_forward = block.forward
+        block.forward = types.MethodType(_patch_mlp_cached_forward, block)
+        block._patch_mlp_weight_cache_enabled = True
         blocks_patched += 1
 
     return WeightCacheStats(
@@ -364,8 +364,8 @@ def apply_candidate002a_patch_mlp_weight_cast_hoist(model) -> WeightCacheStats:
     )
 
 
-def apply_candidate002b1_frame_qkv_weight_cast_hoist(model) -> WeightCacheStats:
-    """Patch frame-attention QKV linears for Candidate 002B-1.
+def apply_frame_qkv_weight_cache(model) -> WeightCacheStats:
+    """Cache BF16 QKV parameters in frame-attention blocks.
 
     Only frame blocks are patched. The original fp32 qkv parameters remain
     untouched. Shadow buffers are marked ``persistent=False`` so they do not
@@ -386,11 +386,11 @@ def apply_candidate002b1_frame_qkv_weight_cast_hoist(model) -> WeightCacheStats:
         if not (hasattr(qkv, "weight") and hasattr(qkv, "bias")):
             continue
         buffers_registered += _refresh_qkv_shadow_buffers(attn)
-        attn._candidate002b1_qkv_linear = types.MethodType(_candidate_qkv_linear, attn)
-        if not hasattr(block, "_candidate002b1_original_forward"):
-            block._candidate002b1_original_forward = block.forward
-        block.forward = types.MethodType(_candidate002b1_frame_block_forward, block)
-        block._candidate002b1_frame_qkv_weight_cast_hoist = True
+        attn._frame_cached_qkv_linear = types.MethodType(_cached_qkv_linear, attn)
+        if not hasattr(block, "_frame_qkv_original_forward"):
+            block._frame_qkv_original_forward = block.forward
+        block.forward = types.MethodType(_frame_qkv_cached_forward, block)
+        block._frame_qkv_weight_cache_enabled = True
         blocks_patched += 1
 
     return WeightCacheStats(
@@ -399,8 +399,8 @@ def apply_candidate002b1_frame_qkv_weight_cast_hoist(model) -> WeightCacheStats:
     )
 
 
-def apply_candidate002b2_patch_qkv_weight_cast_hoist(model) -> WeightCacheStats:
-    """Patch patch_embed QKV linears for Candidate 002B-2.
+def apply_patch_qkv_weight_cache(model) -> WeightCacheStats:
+    """Cache BF16 QKV parameters in patch-embedding blocks.
 
     Only patch_embed blocks are patched. The original fp32 qkv parameters
     remain untouched. Shadow buffers are marked ``persistent=False`` so they do
@@ -416,11 +416,11 @@ def apply_candidate002b2_patch_qkv_weight_cast_hoist(model) -> WeightCacheStats:
         if not (hasattr(qkv, "weight") and hasattr(qkv, "bias")):
             continue
         buffers_registered += _refresh_qkv_shadow_buffers(attn)
-        attn._candidate002b2_qkv_linear = types.MethodType(_candidate_qkv_linear, attn)
-        if not hasattr(block, "_candidate002b2_original_forward"):
-            block._candidate002b2_original_forward = block.forward
-        block.forward = types.MethodType(_candidate002b2_patch_block_forward, block)
-        block._candidate002b2_patch_qkv_weight_cast_hoist = True
+        attn._patch_cached_qkv_linear = types.MethodType(_cached_qkv_linear, attn)
+        if not hasattr(block, "_patch_qkv_original_forward"):
+            block._patch_qkv_original_forward = block.forward
+        block.forward = types.MethodType(_patch_qkv_cached_forward, block)
+        block._patch_qkv_weight_cache_enabled = True
         blocks_patched += 1
 
     return WeightCacheStats(
@@ -429,8 +429,8 @@ def apply_candidate002b2_patch_qkv_weight_cast_hoist(model) -> WeightCacheStats:
     )
 
 
-def apply_candidate002b3_gca_qkv_weight_cast_hoist(model) -> WeightCacheStats:
-    """Patch GCA/global QKV linears for Candidate 002B-3.
+def apply_global_qkv_weight_cache(model) -> WeightCacheStats:
+    """Cache BF16 QKV parameters in global attention blocks.
 
     Only global blocks are patched.  The original fp32 qkv parameters remain
     untouched.  Shadow buffers are marked ``persistent=False`` so they do not
@@ -455,11 +455,11 @@ def apply_candidate002b3_gca_qkv_weight_cast_hoist(model) -> WeightCacheStats:
         if not (hasattr(qkv, "weight") and hasattr(qkv, "bias")):
             continue
         buffers_registered += _refresh_qkv_shadow_buffers(attn)
-        object.__setattr__(qkv, "_candidate002b3_attn_owner_ref", weakref.ref(attn))
-        if not hasattr(qkv, "_candidate002b3_original_forward"):
-            qkv._candidate002b3_original_forward = qkv.forward
-        qkv.forward = types.MethodType(_candidate002b3_qkv_forward, qkv)
-        block._candidate002b3_gca_qkv_weight_cast_hoist = True
+        object.__setattr__(qkv, "_qkv_cache_owner_ref", weakref.ref(attn))
+        if not hasattr(qkv, "_global_qkv_original_forward"):
+            qkv._global_qkv_original_forward = qkv.forward
+        qkv.forward = types.MethodType(_global_qkv_cached_forward, qkv)
+        block._global_qkv_weight_cache_enabled = True
         blocks_patched += 1
 
     return WeightCacheStats(

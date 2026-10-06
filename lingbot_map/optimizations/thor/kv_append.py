@@ -1,4 +1,4 @@
-"""Fail-closed Candidate 021C2 one-operation paged-KV append.
+"""Validated single-call FlashInfer paged-KV append.
 
 This module deliberately contains no custom arithmetic.  It re-expresses the
 accepted patch-page and six-special-token writes as one graph-capturable
@@ -36,7 +36,7 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def validate_candidate021_direct_append_runtime() -> Dict[str, object]:
+def validate_direct_append_runtime() -> Dict[str, object]:
     """Pin the installed FlashInfer append implementation before capture."""
     import flashinfer.page as flashinfer_page
 
@@ -44,7 +44,7 @@ def validate_candidate021_direct_append_runtime() -> Dict[str, object]:
         version = importlib.metadata.version(FLASHINFER_DISTRIBUTION)
     except importlib.metadata.PackageNotFoundError as exc:
         raise RuntimeError(
-            f"Candidate 021C2 requires {FLASHINFER_DISTRIBUTION} distribution metadata"
+            f"Combined KV append requires {FLASHINFER_DISTRIBUTION} distribution metadata"
         ) from exc
 
     root = Path(flashinfer_page.__file__).resolve().parent
@@ -60,7 +60,7 @@ def validate_candidate021_direct_append_runtime() -> Dict[str, object]:
         if observed != expected:
             errors.append(f"{relative} sha256={observed}, expected {expected}")
     if errors:
-        raise RuntimeError("Candidate 021C2 FlashInfer runtime rejected: " + "; ".join(errors))
+        raise RuntimeError("Combined KV append FlashInfer runtime rejected: " + "; ".join(errors))
     return {
         "distribution": FLASHINFER_DISTRIBUTION,
         "version": version,
@@ -69,7 +69,7 @@ def validate_candidate021_direct_append_runtime() -> Dict[str, object]:
     }
 
 
-def candidate021_direct_append_loaded_module_fingerprint() -> Dict[str, object]:
+def direct_append_module_fingerprint() -> Dict[str, object]:
     """Record the actual loaded JIT module in addition to pinned source inputs."""
     import flashinfer.page as flashinfer_page
 
@@ -110,7 +110,7 @@ def _tensor_contract_error(
     return errors
 
 
-def validate_candidate021_direct_append_call(
+def validate_direct_append_call(
     k: torch.Tensor,
     v: torch.Tensor,
     paged_kv_cache: torch.Tensor,
@@ -126,7 +126,7 @@ def validate_candidate021_direct_append_call(
         errors.append(
             f"paged_kv_cache.ndim={paged_kv_cache.ndim}, expected 5"
         )
-        raise RuntimeError("Candidate 021C2 append call rejected: " + "; ".join(errors))
+        raise RuntimeError("Combined KV append append call rejected: " + "; ".join(errors))
 
     device = paged_kv_cache.device
     page_size = int(paged_kv_cache.shape[2])
@@ -220,12 +220,12 @@ def validate_candidate021_direct_append_call(
         )
     )
     if k.requires_grad or v.requires_grad or paged_kv_cache.requires_grad:
-        errors.append("Candidate 021C2 is inference-only")
+        errors.append("Combined KV append is inference-only")
     if errors:
-        raise RuntimeError("Candidate 021C2 append call rejected: " + "; ".join(errors))
+        raise RuntimeError("Combined KV append append call rejected: " + "; ".join(errors))
 
 
-def candidate021_direct_append_paged_kv_cache(
+def append_paged_kv_cache(
     k: torch.Tensor,
     v: torch.Tensor,
     paged_kv_cache: torch.Tensor,
@@ -238,7 +238,7 @@ def candidate021_direct_append_paged_kv_cache(
     """Write patch and special tokens with one mutating FlashInfer operation."""
     import flashinfer.page
 
-    validate_candidate021_direct_append_call(
+    validate_direct_append_call(
         k,
         v,
         paged_kv_cache,

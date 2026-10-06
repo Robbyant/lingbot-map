@@ -1,4 +1,4 @@
-"""CPU checks of historical phase accounting, not throughput measurements."""
+"""CPU checks of streaming state and timing arithmetic, not throughput measurements."""
 import copy
 import json
 import math
@@ -24,19 +24,42 @@ def input_signature(frames):
 
 def capture_contract(frames=19):
     zeros = {f"{section}.{name}": 0 for section, name in COMPILE_COUNTER_KEYS}
+    route = {
+        "scope": "model._predict_depth", "strict": True, "warn_only": False,
+        "eager_swap": False, "depth_impl": "compiled", "depth_calls": 1,
+        "scope_enters": 1, "scope_restores": 1, "compiled_callable_unchanged": True,
+        "aggregator_deterministic_algorithms": False,
+        "camera_deterministic_algorithms": False,
+    }
+    capture = {
+        "prime": dict(route), "capture": dict(route),
+        "compile_counter_delta": dict(zeros),
+        "aggregator_compile_counter_delta": dict(zeros),
+        "replay_uses_captured_strict_depth": True,
+        "host_deterministic_flag_during_replay": False,
+        "capture_boundary": "aggregator_and_depth_only",
+        "camera_execution": "uncaptured_original_dynamic_history",
+        "temporal_positions": "original_rope_copied_each_frame",
+        "prime_consumes_camera_history": False,
+    }
     return {
         "formal_protocol_version": PROTOCOL_VERSION,
-        "capture_boundary": "whole_frame",
-        "camera_execution": "captured_fixed_python_state",
-        "temporal_positions": "fixed_at_capture",
+        "capture_boundary": "aggregator_and_depth_only",
+        "camera_execution": "uncaptured_original_dynamic_history",
+        "temporal_positions": "original_rope_copied_each_frame",
         "formal_scale_no_recompile": True, "formal_warm_no_recompile": True,
         "scale_matches_prewarm": True, "warm_frames_match_prewarm": True,
         "formal_scale_compile_counter_delta": dict(zeros),
         "formal_warm_compile_counter_delta": dict(zeros),
         "replay_compile_counter_delta": dict(zeros),
         "input_signature": input_signature(frames),
-        "steady_state_prime": {"depth_impl": "compiled", "deterministic_algorithms": False},
-        "cuda_graph_capture": {"depth_impl": "compiled", "deterministic_algorithms": False},
+        "steady_state_prime": {"depth_impl": "compiled", "deterministic_algorithms": True},
+        "cuda_graph_capture": {"depth_impl": "compiled", "deterministic_algorithms": True},
+        "capture_depth_contract": capture,
+        "completed_streaming_state": {
+            "aggregator_frames": frames, "camera_frames": frames,
+            "replayed_frames": frames - 18, "camera_cache_lengths": [frames] * 16,
+        },
     }
 
 
@@ -78,7 +101,8 @@ class ThorMeasurementsTest(unittest.TestCase):
         self.assertTrue(summary["setup_compile_capture_excluded"])
         self.assertTrue(summary["output_collection_excluded"])
         self.assertEqual(summary["host_replay_includes"], [
-            "static_input_copy", "cache_preparation", "graph_replay", "synchronize",
+            "input_update", "static_input_copy", "position_update", "cache_preparation",
+            "aggregator_graph_replay", "dynamic_camera", "depth_graph_replay", "synchronize",
         ])
 
     def test_raw_sample_and_phase_counts_rejected(self):
@@ -130,7 +154,7 @@ class ThorMeasurementsTest(unittest.TestCase):
 
     def test_tuple_and_json_results_still_reject_invalid_protocol(self):
         result = timing_result()
-        result[9]["formal_protocol_version"] = 4
+        result[9]["formal_protocol_version"] = 2
         for value in (tuple(result), json.loads(json.dumps(result))):
             with self.subTest(container=type(value).__name__), self.assertRaises(ValueError):
                 summarize_timing(value, 19)
@@ -144,31 +168,54 @@ class ThorMeasurementsTest(unittest.TestCase):
                 require_zero_compile(delta)
         require_zero_compile(zeros)
 
-    def test_whole_frame_contract_is_required(self):
+    def test_streaming_contract_is_required(self):
         for key in capture_contract():
-            if key == "input_signature":
-                continue  # Validated against the record's requested frame count.
             contract = copy.deepcopy(capture_contract())
             del contract[key]
             with self.subTest(key=key), self.assertRaises(ValueError):
                 validate_contract(contract)
 
-    def test_protocol4_and_dynamic_capture_contracts_rejected(self):
-        for key, value in (("formal_protocol_version", 4), ("formal_protocol_version", 2.0),
-                           ("capture_boundary", "aggregator_and_depth_only"),
-                           ("camera_execution", "uncaptured_original_dynamic_history"),
-                           ("temporal_positions", "original_rope_copied_each_frame")):
+    def test_legacy_fixed_state_contracts_rejected(self):
+        for key, value in (("formal_protocol_version", 2), ("formal_protocol_version", 4.0),
+                           ("capture_boundary", "whole_frame"),
+                           ("camera_execution", "captured_fixed_python_state"),
+                           ("temporal_positions", "fixed_at_capture")):
             contract = capture_contract()
             contract[key] = value
             with self.subTest(key=key), self.assertRaises(ValueError):
                 validate_contract(contract)
 
-    def test_prime_and_capture_must_have_determinism_disabled(self):
+    def test_prime_and_capture_must_use_strict_depth(self):
         for phase in ("steady_state_prime", "cuda_graph_capture"):
-            for value in (True, None, 0):
+            for value in (False, None, 1):
                 contract = capture_contract()
                 contract[phase]["deterministic_algorithms"] = value
                 with self.subTest(phase=phase, value=value), self.assertRaises(ValueError):
+                    validate_contract(contract)
+
+    def test_frozen_or_incomplete_camera_state_rejected(self):
+        for key, value in (("camera_frames", 18), ("aggregator_frames", 18),
+                           ("replayed_frames", 0), ("camera_cache_lengths", [18] * 16),
+                           ("camera_cache_lengths", [19] * 15),
+                           ("camera_cache_lengths", [19.0] * 16)):
+            contract = capture_contract()
+            contract["completed_streaming_state"][key] = value
+            with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                validate_contract(contract)
+
+    def test_invalid_nested_capture_evidence_rejected(self):
+        for key in capture_contract()["capture_depth_contract"]:
+            contract = capture_contract()
+            del contract["capture_depth_contract"][key]
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                validate_contract(contract)
+        for phase in ("prime", "capture"):
+            for key, value in (("depth_calls", 0), ("strict", False),
+                               ("warn_only", True), ("depth_impl", "eager"),
+                               ("compiled_callable_unchanged", False)):
+                contract = capture_contract()
+                contract["capture_depth_contract"][phase][key] = value
+                with self.subTest(phase=phase, key=key), self.assertRaises(ValueError):
                     validate_contract(contract)
 
 
