@@ -377,7 +377,10 @@ class FlashInferAttention(Attention):
         kv_cache_camera_only: bool = False,
     ) -> None:
         if not FLASHINFER_AVAILABLE:
-            raise RuntimeError("FlashInfer is not available. Please install flashinfer.")
+            raise RuntimeError(
+                "FlashInfer is not available. Install flashinfer-python for the "
+                "CUDA fast path, or use the SDPA backend (--use_sdpa / use_sdpa=True)."
+            )
 
         super().__init__(
             dim=dim,
