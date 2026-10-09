@@ -52,6 +52,20 @@ except ImportError:
     FLASHINFER_AVAILABLE = False
 
 
+def _default_flashinfer_dtype(device: torch.device) -> torch.dtype:
+    """Pick a FlashInfer-compatible dtype based on CUDA compute capability.
+
+    bfloat16 requires SM80+ (Ampere). On SM<80 (e.g. Turing SM75 / Titan RTX)
+    only fp16 FlashInfer kernels are available.
+    """
+    if torch.cuda.is_available():
+        idx = device.index if (isinstance(device, torch.device) and device.index is not None) else None
+        major, _ = torch.cuda.get_device_capability(idx)
+        if major >= 8:
+            return torch.bfloat16
+    return torch.float16
+
+
 class FlashInferKVCacheManager:
     """
     Two-stream paged KV cache: patch pages (recyclable) + special pages (append-only).
@@ -122,8 +136,12 @@ class FlashInferKVCacheManager:
         if force_fp32:
             self.dtype = torch.float32
         else:
-            if dtype == torch.float32:
-                dtype = torch.bfloat16
+            # FlashInfer FA2 only supports fp16/bf16. If the caller passed fp32
+            # (or None) we have to pick one. bfloat16 needs SM80+ (Ampere); on
+            # SM<80 (Turing/Volta, e.g. Titan RTX SM75) bf16 kernels won't run,
+            # so fall back to fp16 there.
+            if dtype is None or dtype == torch.float32:
+                dtype = _default_flashinfer_dtype(device)
             self.dtype = dtype
         self.device = device
 
