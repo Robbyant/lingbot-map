@@ -158,8 +158,8 @@ class AUCEvaluator:
                                     num_frames: int) -> Tuple[np.ndarray, np.ndarray]:
         """Compute relative pose errors between frame pairs (W2C format)."""
         pair_idx_i1, pair_idx_i2 = self._build_pair_index(num_frames)
-        relative_pose_gt = invert_transform(gt_se3[pair_idx_i1]) @ gt_se3[pair_idx_i2]
-        relative_pose_pred = invert_transform(pred_se3[pair_idx_i1]) @ pred_se3[pair_idx_i2]
+        relative_pose_gt = gt_se3[pair_idx_i1] @ invert_transform(gt_se3[pair_idx_i2])
+        relative_pose_pred = pred_se3[pair_idx_i1] @ invert_transform(pred_se3[pair_idx_i2])
         rel_rangle_deg = self._rotation_angle(
             relative_pose_gt[:, :3, :3], relative_pose_pred[:, :3, :3]
         )

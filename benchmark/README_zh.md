@@ -218,6 +218,10 @@ python evaluate.py --config configs/droid_w.yaml
 | Racc@{3,5,15,30} | 旋转精度（低于阈值的 pair 百分比） |
 | Tacc@{3,5,15,30} | 平移精度（低于阈值的 pair 百分比） |
 
+存储的轨迹使用 C2W。AUC 评价器将其转换为 W2C，每个图像对使用
+`W_i @ invert_transform(W_j)` 计算相对位姿。更新评价器后，请使用 `--force`
+重新评价，刷新此前保存的 AUC 结果。
+
 聚合模式（通过 `evaluation.auc.aggregation` 配置）：
 
 | 模式 | 说明 |

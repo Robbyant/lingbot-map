@@ -227,6 +227,10 @@ One representative scene per dataset. Each panel overlays the Sim(3)-aligned pre
 | Racc@{3,5,15,30} | Rotation accuracy: fraction of pairs below threshold |
 | Tacc@{3,5,15,30} | Translation accuracy: fraction of pairs below threshold |
 
+Stored trajectories are C2W. AUC evaluation converts them to W2C and computes
+each frame pair as `W_i @ invert_transform(W_j)`. After updating the evaluator,
+rerun evaluation with `--force` to refresh previously saved AUC results.
+
 Aggregation modes (configured via `evaluation.auc.aggregation`):
 
 - **micro**: Pool all pairwise errors across scenes, compute AUC once. Larger scenes dominate due to O(N^2) pairs.
