@@ -1,0 +1,202 @@
+{
+  "status": "historical_fixed_state_not_corrected_streaming",
+  "superseded_reason": "Camera history and temporal positions were fixed at capture; eager and graph special-page allocation did not agree. The corrected streaming runner rejects this protocol.",
+  "measurement_date": "2026-09-13",
+  "scope": "historical_whole_frame_cuda_graph_synthetic_ablation",
+  "protocol": {
+    "frames": 1000,
+    "scale_frames": 8,
+    "warm_frames": 10,
+    "replay_frames": 982,
+    "input_shape": [
+      1,
+      1000,
+      3,
+      378,
+      518
+    ],
+    "tokens_per_frame": 1005,
+    "seed": 42,
+    "checkpoint_loaded": false,
+    "input_initialization": "CUDA FP32 random input cast to BF16 before model construction",
+    "physical_patch_window": 64,
+    "camera_iterations": 4,
+    "heads": "serial_camera_then_depth",
+    "position_arithmetic": "historical FP32",
+    "camera_temporal_state": "fixed_at_capture",
+    "special_page_handoff": "historical_eager_descending_graph_ascending",
+    "fps_formula": "1000 / median(run-level host milliseconds per requested frame)",
+    "time_includes": [
+      "scale",
+      "warm",
+      "input update",
+      "cache preparation",
+      "whole-frame graph replay",
+      "synchronize"
+    ],
+    "time_excludes": [
+      "model construction",
+      "compilation",
+      "rehearsal",
+      "capture",
+      "output collection"
+    ]
+  },
+  "environment": {
+    "gpu": "NVIDIA Thor SM110",
+    "power_mode_w": 120,
+    "python": "3.12.13",
+    "pytorch": "2.12.0+cu130",
+    "cuda": "13.0",
+    "flashinfer": "0.6.11.post3",
+    "fa4_reference": "4.0.0b14",
+    "fa4_query_staging": "4.0.0b15",
+    "cute_dsl": "4.5.2"
+  },
+  "rows": [
+    {
+      "configuration": "All optimization switches off",
+      "run_count": 3,
+      "median_host_ms_per_requested_frame": 194.37157164904056,
+      "fps": 5.1447852765506825,
+      "step_fps_gain_percent": 0,
+      "total_fps_gain_percent": 0
+    },
+    {
+      "configuration": "+ MLP/QKV weight caching",
+      "run_count": 2,
+      "median_host_ms_per_requested_frame": 173.55956570542185,
+      "fps": 5.761710660749602,
+      "step_fps_gain_percent": 11.9912756516932,
+      "total_fps_gain_percent": 11.9912756516932
+    },
+    {
+      "configuration": "+ Projection caching and combined KV append",
+      "run_count": 2,
+      "median_host_ms_per_requested_frame": 171.58015461929608,
+      "fps": 5.828179851095314,
+      "step_fps_gain_percent": 1.1536363809192984,
+      "total_fps_gain_percent": 13.283247751066728
+    },
+    {
+      "configuration": "+ FA4 dual-stage Query staging",
+      "run_count": 2,
+      "median_host_ms_per_requested_frame": 149.54830165646854,
+      "fps": 6.686802784943203,
+      "step_fps_gain_percent": 14.732265574929437,
+      "total_fps_gain_percent": 29.972436661659163
+    },
+    {
+      "configuration": "+ Single-page KV addressing",
+      "run_count": 3,
+      "median_host_ms_per_requested_frame": 146.12003437499516,
+      "fps": 6.84368850772133,
+      "step_fps_gain_percent": 2.3461993395616387,
+      "total_fps_gain_percent": 33.02184911222719
+    }
+  ],
+  "runs": [
+    {
+      "configuration": "All optimization switches off",
+      "order": "forward",
+      "source_run_name": "r0_all_off",
+      "host_ms_per_requested_frame": 194.40425408259034,
+      "fps": 5.143920356676772
+    },
+    {
+      "configuration": "+ MLP/QKV weight caching",
+      "order": "forward",
+      "source_run_name": "r1_mlp_qkv_cache",
+      "host_ms_per_requested_frame": 173.5278869200847,
+      "fps": 5.762762503185052
+    },
+    {
+      "configuration": "+ Projection caching and combined KV append",
+      "order": "forward",
+      "source_run_name": "r2_projection_append",
+      "host_ms_per_requested_frame": 171.54834650841076,
+      "fps": 5.829260499173459
+    },
+    {
+      "configuration": "+ FA4 dual-stage Query staging",
+      "order": "forward",
+      "source_run_name": "r3_query_staging",
+      "host_ms_per_requested_frame": 149.6453843274503,
+      "fps": 6.682464711452943
+    },
+    {
+      "configuration": "+ Single-page KV addressing",
+      "order": "forward",
+      "source_run_name": "r4_single_page_affine",
+      "host_ms_per_requested_frame": 146.10190773458453,
+      "fps": 6.8445375936955335
+    },
+    {
+      "configuration": "+ Single-page KV addressing",
+      "order": "reverse",
+      "source_run_name": "r4_single_page_affine__reverse",
+      "host_ms_per_requested_frame": 146.12003437499516,
+      "fps": 6.84368850772133
+    },
+    {
+      "configuration": "+ FA4 dual-stage Query staging",
+      "order": "reverse",
+      "source_run_name": "r3_query_staging__reverse",
+      "host_ms_per_requested_frame": 149.45121898548678,
+      "fps": 6.691146494409725
+    },
+    {
+      "configuration": "+ Projection caching and combined KV append",
+      "order": "reverse",
+      "source_run_name": "r2_projection_append__reverse",
+      "host_ms_per_requested_frame": 171.6119627301814,
+      "fps": 5.827099603611316
+    },
+    {
+      "configuration": "+ MLP/QKV weight caching",
+      "order": "reverse",
+      "source_run_name": "r1_mlp_qkv_cache__reverse",
+      "host_ms_per_requested_frame": 173.59124449075898,
+      "fps": 5.760659202217047
+    },
+    {
+      "configuration": "All optimization switches off",
+      "order": "reverse",
+      "source_run_name": "r0_all_off__reverse",
+      "host_ms_per_requested_frame": 194.24354141025105,
+      "fps": 5.148176318964218
+    },
+    {
+      "configuration": "All optimization switches off",
+      "order": "third",
+      "source_run_name": "r0_all_off__third",
+      "host_ms_per_requested_frame": 194.37157164904056,
+      "fps": 5.1447852765506825
+    },
+    {
+      "configuration": "+ Single-page KV addressing",
+      "order": "third",
+      "source_run_name": "r4_single_page_affine__third",
+      "host_ms_per_requested_frame": 146.18760563246906,
+      "fps": 6.84052519824495
+    }
+  ],
+  "checkout_revalidation": {
+    "runner_contract_id": "thor_legacy_1005_whole_frame_protocol_v3",
+    "validation": {
+      "frames": 200,
+      "replay_frames": 182,
+      "configurations": 4,
+      "checked_output_batches": 193,
+      "baseline_repeat_equal": true,
+      "all_configurations_equal_to_baseline": true
+    },
+    "timing": {
+      "frames": 1000,
+      "orders": ["forward", "reverse"],
+      "all_off_fps": 5.145811720623452,
+      "single_page_affine_fps": 6.844850209475473,
+      "endpoint_pair_within_historical_percent": 0.03
+    }
+  }
+}

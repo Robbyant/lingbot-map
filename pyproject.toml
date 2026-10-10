@@ -16,6 +16,7 @@ dependencies = [
 [project.optional-dependencies]
 vis = ["viser>=0.2.23", "trimesh", "matplotlib", "onnxruntime", "requests"]
 demo = ["lingbot-map[vis]"]
+thor = ["numpy", "ninja", "packaging", "flashinfer-python==0.6.11.post3", "flash-attn-4==4.0.0b14", "nvidia-cutlass-dsl[cu13]==4.5.2"]
 
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]
@@ -24,3 +25,9 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["lingbot_map*"]
+
+[tool.setuptools.package-data]
+lingbot_map = ["_vendor/flash_attn_4_0_0b15/VERSION", "_vendor/flash_attn_4_0_0b15/LICENSE", "_vendor/flash_attn_4_0_0b15/AUTHORS", "_vendor/flash_attn_4_0_0b15/README.md", "_vendor/flash_attn_4_0_0b15/**/*.py"]
+
+[tool.setuptools.exclude-package-data]
+"*" = ["**/__pycache__/*", "**/*.pyc", "**/*.so"]
