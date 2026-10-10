@@ -526,6 +526,37 @@ def run_inference(model, images, args):
     return prepare_for_visualization(predictions, images_cpu)
 
 
+def _saved_predictions_complete(output_path):
+    """Recognize fully written per-frame prediction directories.
+
+    Unmarked directories predate completion tracking and are conservatively
+    retried. This checks write completion, not input/config identity or content
+    integrity; --skip_existing retains its existing name-based semantics.
+    """
+    dir_path = output_path[:-4] if output_path.endswith('.npz') else output_path
+    try:
+        with open(os.path.join(dir_path, 'predictions_complete.json')) as f:
+            complete = json.load(f)
+        if not isinstance(complete, dict) or complete.get('version') != 1:
+            return False
+        count = complete.get('frames')
+        if type(count) is not int or count < 1 or type(complete.get('metadata')) is not bool:
+            return False
+        actual = {os.path.basename(p) for p in glob.glob(os.path.join(glob.escape(dir_path), 'frame_*.npz'))}
+        if len(actual) != count:
+            return False
+        expected = {f'frame_{i:06d}.npz' for i in range(count)}
+        if actual != expected:
+            return False
+        if complete['metadata']:
+            expected.add('meta.npz')
+        return all(os.path.isfile(os.path.join(dir_path, name))
+                   and os.path.getsize(os.path.join(dir_path, name)) > 0
+                   for name in expected)
+    except (OSError, ValueError):
+        return False
+
+
 def save_predictions_npz(predictions, output_path):
     """Save predictions as per-frame .npz files in a directory (parallel I/O).
 
@@ -533,6 +564,9 @@ def save_predictions_npz(predictions, output_path):
     ``.npz`` per frame: ``frame_000000.npz``, ``frame_000001.npz``, ...
     Each per-frame npz contains the slice along the sequence dimension for
     every array key.  Non-sequence scalars/metadata are saved in ``meta.npz``.
+    ``predictions_complete.json`` records the frame count and metadata presence
+    only after every write succeeds. It is invalidated before rewriting files,
+    allowing --skip_existing to distinguish complete output from partial output.
 
     This is much faster than a single large ``np.savez`` because each frame
     is small and frames are written in parallel.
@@ -542,9 +576,12 @@ def save_predictions_npz(predictions, output_path):
     dir_path = output_path
     if dir_path.endswith('.npz'):
         dir_path = dir_path[:-4]
+    completion_path = os.path.join(dir_path, 'predictions_complete.json')
+    if os.path.exists(completion_path):
+        os.remove(completion_path)
     # Clean stale frame files from previous runs to avoid ghost frames
     if os.path.isdir(dir_path):
-        old_frames = glob.glob(os.path.join(dir_path, 'frame_*.npz'))
+        old_frames = glob.glob(os.path.join(glob.escape(dir_path), 'frame_*.npz'))
         if old_frames:
             for f in old_frames:
                 os.remove(f)
@@ -552,6 +589,11 @@ def save_predictions_npz(predictions, output_path):
         if os.path.exists(old_meta):
             os.remove(old_meta)
     os.makedirs(dir_path, exist_ok=True)
+
+    def _mark_complete(frame_count, has_metadata):
+        # A truncated/interrupted JSON write is rejected by the skip check.
+        with open(completion_path, 'w') as f:
+            json.dump({'version': 1, 'frames': frame_count, 'metadata': has_metadata}, f)
 
     # Separate sequence arrays (have a frame dim) from metadata
     # Sequence arrays have shape (S, ...) or (B, S, ...) with B==1
@@ -572,6 +614,7 @@ def save_predictions_npz(predictions, output_path):
         # Fallback: no sequence arrays found, save everything in one file
         save_dict = {k: v for k, v in predictions.items() if isinstance(v, np.ndarray)}
         np.savez(os.path.join(dir_path, "frame_000000.npz"), **save_dict)
+        _mark_complete(1, False)
         print(f"Predictions saved to {dir_path}/ (1 file, {len(save_dict)} keys)")
         return dir_path
 
@@ -588,6 +631,8 @@ def save_predictions_npz(predictions, output_path):
     # Save metadata (non-sequence arrays) separately
     if meta_dict:
         np.savez(os.path.join(dir_path, "meta.npz"), **meta_dict)
+
+    _mark_complete(S, bool(meta_dict))
 
     print(f"Predictions saved to {dir_path}/ ({S} frames, {len(seq_keys)} keys/frame)")
     return dir_path
@@ -940,7 +985,7 @@ def process_scene(args, scene_name, image_folder, model, device, video_images=No
     npz_path = os.path.join(args.output_folder, f"{scene_name}.npz")
     glb_path = os.path.join(args.output_folder, f"{scene_name}.glb")
     result["output_video"] = video_path
-    result["output_npz"] = npz_path if args.save_predictions else None
+    result["output_npz"] = None
     result["output_glb"] = glb_path if args.save_glb else None
 
     try:
@@ -987,6 +1032,7 @@ def process_scene(args, scene_name, image_folder, model, device, video_images=No
         # save_predictions_npz strips the .npz suffix and writes to a directory
         # of per-frame files; it returns the actual output path.
         saved_npz_path = save_predictions_npz(predictions, npz_path)
+        result["output_npz"] = saved_npz_path if args.save_predictions else None
 
         if not args.no_render:
             print(f"Rendering video to {video_path}...")
@@ -1346,7 +1392,11 @@ def _discover_scenes(args, parser, video_images=None):
             and args.skip_existing
             and (
                 (not args.no_render and os.path.exists(output_video))
-                or (args.save_predictions and os.path.exists(output_npz))
+                or (args.save_predictions and os.path.isfile(output_npz))
+                # A completed prediction directory cannot prove that rendering
+                # or GLB export succeeded. Only skip prediction-only runs here.
+                or (args.save_predictions and args.no_render and not args.save_glb
+                    and _saved_predictions_complete(output_npz))
             )
         )
         if should_skip:
