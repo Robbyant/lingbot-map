@@ -597,6 +597,7 @@ def main():
             point_size=args.point_size,
             mask_sky=args.mask_sky,
             image_folder=resolved_image_folder,
+            image_paths=paths,
             skyseg_model_path=args.sky_model,
             sky_mask_dir=args.sky_mask_dir,
             sky_mask_visualization_dir=args.sky_mask_visualization_dir,
