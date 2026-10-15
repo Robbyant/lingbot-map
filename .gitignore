@@ -15,5 +15,8 @@ skyseg.onnx
 weights/
 .DS_Store
 **/.DS_Store
-docs/
-
+/profile/
+/review/
+/docs/*
+!/docs/thor_streaming_1005_benchmark.md
+!/docs/thor_streaming_1005_benchmark.json
