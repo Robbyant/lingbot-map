@@ -200,7 +200,10 @@ class AggregatorStream(AggregatorBase):
 
         Args:
             device: Device for cache tensors.
-            dtype: Data type for cache tensors.
+            dtype: Data type for cache tensors. If fp32 (e.g. tokens kept fp32 by
+                an autocast-exempt op like LayerNorm), prefer the aggregator's
+                parameter dtype, which reflects the inference dtype chosen at
+                model load time.
             tokens_per_frame: Actual number of tokens per frame (patches + specials).
                 If None, falls back to assuming square images of self.img_size.
         """
@@ -212,6 +215,15 @@ class AggregatorStream(AggregatorBase):
                 tokens_per_frame = (self.img_size // self.patch_size) ** 2 + self.num_special_tokens
             # max_num_frames: scale + window + headroom
             max_num_frames = self.kv_cache_scale_frames + self.kv_cache_sliding_window + 16
+
+            if dtype is None or dtype == torch.float32:
+                try:
+                    param_dtype = next(self.parameters()).dtype
+                    if param_dtype != torch.float32:
+                        dtype = param_dtype
+                except StopIteration:
+                    pass
+
             self.kv_cache_manager = FlashInferKVCacheManager(
                 num_blocks=self.depth,
                 max_num_frames=max_num_frames,
