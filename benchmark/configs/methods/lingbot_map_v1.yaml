@@ -1,10 +1,12 @@
 model: lingbot_map
 env: lingbot-map
 _checkpoint: /path/to/lingbot-map.pt
-_device: cuda
+# Device: cpu (portable default), cuda, or auto (CUDA only if free VRAM ≥ ~8 GiB).
+_device: cpu
 _mode: streaming
 _use_amp: true
-_use_sdpa: false  # Force FlashInfer backend (paged KV cache attention)
+# true = force SDPA. false = try FlashInfer on CUDA when installed; SDPA otherwise.
+_use_sdpa: true
 _image_size: 518
 _patch_size: 14
 _enable_3d_rope: true

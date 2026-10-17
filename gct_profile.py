@@ -252,6 +252,12 @@ def main():
     if args.keyframe_interval < 1:
         parser.error(f"--keyframe_interval must be >= 1 (got {args.keyframe_interval})")
 
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            "gct_profile.py requires CUDA. For portable inference use "
+            "`python demo.py --device cpu` (SDPA, no FlashInfer)."
+        )
+
     dtype_map = {'bf16': torch.bfloat16, 'fp32': torch.float32}
     backends = ['sdpa', 'flashinfer'] if args.backend == 'both' else [args.backend]
     dtypes = ['bf16', 'fp32'] if args.dtype == 'both' else [args.dtype]

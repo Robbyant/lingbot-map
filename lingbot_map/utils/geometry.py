@@ -448,17 +448,20 @@ def pose_matrix_to_quaternion(pose):
 def compute_distance_matrix_flow(poses, disps, intrinsics):
     """ compute flow magnitude between all pairs of frames """
     if not isinstance(poses, SE3):
-        poses = torch.from_numpy(poses).float().cuda()[None]
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        poses = torch.from_numpy(poses).float().to(device)[None]
         poses = SE3(poses).inv()
 
-        disps = torch.from_numpy(disps).float().cuda()[None]
-        intrinsics = torch.from_numpy(intrinsics).float().cuda()[None]
+        disps = torch.from_numpy(disps).float().to(device)[None]
+        intrinsics = torch.from_numpy(intrinsics).float().to(device)[None]
+    else:
+        device = disps.device
 
     N = poses.shape[1]
     
     ii, jj = torch.meshgrid(torch.arange(N), torch.arange(N))
-    ii = ii.reshape(-1).cuda()
-    jj = jj.reshape(-1).cuda()
+    ii = ii.reshape(-1).to(device)
+    jj = jj.reshape(-1).to(device)
 
     MAX_FLOW = 100.0
     matrix = np.zeros((N, N), dtype=np.float32)
