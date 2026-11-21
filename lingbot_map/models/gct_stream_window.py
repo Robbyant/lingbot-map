@@ -603,16 +603,16 @@ class GCTStream(GCTBase):
 
                 if not is_keyframe:
                     self._set_skip_append(True)
-
-                frame_output = self.forward(
-                    frame_image,
-                    num_frame_for_scale=scale_frames,
-                    num_frame_per_block=1,
-                    causal_inference=True,
-                )
-
-                if not is_keyframe:
-                    self._set_skip_append(False)
+                try:
+                    frame_output = self.forward(
+                        frame_image,
+                        num_frame_for_scale=scale_frames,
+                        num_frame_per_block=1,
+                        causal_inference=True,
+                    )
+                finally:
+                    if not is_keyframe:
+                        self._set_skip_append(False)
 
             all_pose_enc.append(_to_out(frame_output["pose_enc"]))
             if "depth" in frame_output:
@@ -1240,16 +1240,16 @@ class GCTStream(GCTBase):
 
                     if not is_keyframe:
                         self._set_skip_append(True)
-
-                    frame_out = self.forward(
-                        window_images[:, i:i + 1],
-                        num_frame_for_scale=window_scale,
-                        num_frame_per_block=1,
-                        causal_inference=True,
-                    )
-
-                    if not is_keyframe:
-                        self._set_skip_append(False)
+                    try:
+                        frame_out = self.forward(
+                            window_images[:, i:i + 1],
+                            num_frame_for_scale=window_scale,
+                            num_frame_per_block=1,
+                            causal_inference=True,
+                        )
+                    finally:
+                        if not is_keyframe:
+                            self._set_skip_append(False)
 
                     _collect_frame(frame_out, w_lists)
                     w_lists['frame_type'].append(1 if is_keyframe else 2)

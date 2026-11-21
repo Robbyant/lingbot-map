@@ -154,6 +154,32 @@ def segment_sky_from_array(
     return _result_map_to_non_sky_conf(result_map)
 
 
+def _imread_unicode(path: str, flags: int = cv2.IMREAD_COLOR) -> Optional[np.ndarray]:
+    """Read an image with Unicode / non-ASCII path safety across platforms."""
+    try:
+        raw = np.fromfile(path, dtype=np.uint8)
+        if raw.size == 0:
+            return None
+        return cv2.imdecode(raw, flags)
+    except OSError:
+        return None
+
+
+def _imwrite_unicode(path: str, img: np.ndarray) -> bool:
+    """Write an image with Unicode / non-ASCII path safety across platforms."""
+    ext = os.path.splitext(path)[1] or ".png"
+    ok, encoded = cv2.imencode(ext, img)
+    if not ok:
+        return False
+    encoded.tofile(path)
+    return True
+
+
+def _default_sky_mask_dir(image_folder: str) -> str:
+    resolved = os.path.abspath(image_folder).rstrip("/\\")
+    return f"{resolved}_sky_masks"
+
+
 def segment_sky(
     image_path: str,
     skyseg_session,
@@ -170,7 +196,7 @@ def segment_sky(
     Returns:
         Continuous non-sky confidence map in [0, 1].
     """
-    image = cv2.imread(image_path)
+    image = _imread_unicode(image_path, cv2.IMREAD_COLOR)
     if image is None:
         raise ValueError(f"Failed to read image: {image_path}")
 
@@ -182,13 +208,13 @@ def segment_sky(
         output_dir = os.path.dirname(output_path)
         if output_dir:
             os.makedirs(output_dir, exist_ok=True)
-        cv2.imwrite(output_path, _mask_to_uint8(mask))
+        _imwrite_unicode(output_path, _mask_to_uint8(mask))
 
     return mask
 
 
 def _list_image_files(image_folder: str) -> list[str]:
-    image_files = sorted(glob.glob(os.path.join(image_folder, "*")))
+    image_files = sorted(glob.glob(os.path.join(glob.escape(image_folder), "*")))
     image_extensions = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp"}
     return [f for f in image_files if os.path.splitext(f.lower())[1] in image_extensions]
 
@@ -239,7 +265,7 @@ def _save_sky_mask_visualization(
     output_dir = os.path.dirname(output_path)
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
-    cv2.imwrite(output_path, cv2.cvtColor(panel, cv2.COLOR_RGB2BGR))
+    _imwrite_unicode(output_path, cv2.cvtColor(panel, cv2.COLOR_RGB2BGR))
 
 
 def load_or_create_sky_masks(
@@ -296,7 +322,7 @@ def load_or_create_sky_masks(
             image_paths = image_paths[:num_images]
 
         if sky_mask_dir is None and image_folder is not None:
-            sky_mask_dir = image_folder.rstrip("/") + "_sky_masks"
+            sky_mask_dir = _default_sky_mask_dir(image_folder)
         refresh_cache = _prepare_sky_mask_cache(sky_mask_dir)
 
         print("Generating sky masks from image array...")
@@ -307,17 +333,17 @@ def load_or_create_sky_masks(
             mask_filepath = os.path.join(sky_mask_dir, image_name) if sky_mask_dir is not None else None
 
             if mask_filepath is not None and not refresh_cache and os.path.exists(mask_filepath):
-                sky_mask = cv2.imread(mask_filepath, cv2.IMREAD_GRAYSCALE)
+                sky_mask = _imread_unicode(mask_filepath, cv2.IMREAD_GRAYSCALE)
                 if sky_mask is not None and sky_mask.shape[:2] == (image_h, image_w):
                     # Reuse cached mask
                     pass
                 else:
                     sky_mask = segment_sky_from_array(image_rgb, skyseg_session, image_h, image_w)
-                    cv2.imwrite(mask_filepath, _mask_to_uint8(sky_mask))
+                    _imwrite_unicode(mask_filepath, _mask_to_uint8(sky_mask))
             else:
                 sky_mask = segment_sky_from_array(image_rgb, skyseg_session, image_h, image_w)
                 if mask_filepath is not None:
-                    cv2.imwrite(mask_filepath, _mask_to_uint8(sky_mask))
+                    _imwrite_unicode(mask_filepath, _mask_to_uint8(sky_mask))
 
             if sky_mask_visualization_dir is not None:
                 _save_sky_mask_visualization(
@@ -349,8 +375,8 @@ def load_or_create_sky_masks(
 
         if sky_mask_dir is None:
             if image_folder is None:
-                image_folder = os.path.dirname(image_paths[0])
-            sky_mask_dir = image_folder.rstrip("/") + "_sky_masks"
+                image_folder = os.path.dirname(image_paths[0]) or "."
+            sky_mask_dir = _default_sky_mask_dir(image_folder)
         refresh_cache = _prepare_sky_mask_cache(sky_mask_dir)
 
         print("Generating sky masks from image files...")
@@ -359,7 +385,7 @@ def load_or_create_sky_masks(
             mask_filepath = os.path.join(sky_mask_dir, image_name)
 
             if not refresh_cache and os.path.exists(mask_filepath):
-                sky_mask = cv2.imread(mask_filepath, cv2.IMREAD_GRAYSCALE)
+                sky_mask = _imread_unicode(mask_filepath, cv2.IMREAD_GRAYSCALE)
                 if sky_mask is None:
                     print(f"Warning: Failed to read cached sky mask {mask_filepath}, regenerating it")
                     sky_mask = segment_sky(image_path, skyseg_session, mask_filepath)
@@ -371,7 +397,7 @@ def load_or_create_sky_masks(
                 continue
 
             if sky_mask_visualization_dir is not None:
-                image_bgr = cv2.imread(image_path)
+                image_bgr = _imread_unicode(image_path, cv2.IMREAD_COLOR)
                 if image_bgr is not None:
                     image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
                     _save_sky_mask_visualization(
