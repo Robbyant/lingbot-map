@@ -22,7 +22,7 @@ Robbyant Team
 https://github.com/user-attachments/assets/fe39e095-af2c-4ec9-b68d-a8ba97e505ab
 
 > [!IMPORTANT]
-> ## 🎉 LingBot-Map 2.0 is now available!
+> ## 🎉 LingBot-Map 2.0 Geometric Streaming Base Model is now available!
 >
 >
 > **👉 Please try our latest model:**
