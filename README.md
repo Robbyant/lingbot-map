@@ -614,7 +614,7 @@ The extended technical report (LingBot-Map) can be cited as:
 
 ```bibtex
 @article{chen2026lingbotmap,
-  title   = {{LingBot-Map}: Geometric Context Transformer for Streaming {3D} Reconstruction},
+  title   = {LingBot-Map: Geometric Context Transformer for Streaming 3D Reconstruction},
   author  = {Chen, Lin-Zhuo and Gao, Jian and Zhang, Shangzhan and Chen, Yihang and Cheng, Ka Leong and Sun, Yipengjing and Hu, Liangxiao and Xue, Nan and Zhu, Xing and Shen, Yujun and Yao, Yao and Xu, Yinghao},
   journal = {arXiv preprint arXiv:2604.14141},
   year    = {2026}
