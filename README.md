@@ -601,12 +601,12 @@ If you use LingBot-Map in your research, please cite the ECCV 2026 paper:
 
 ```bibtex
 @inproceedings{chen2026geometric,
-  title     = {Geometric Context Transformer for Streaming {3D} Reconstruction},
-  author    = {Chen, Lin-Zhuo and Gao, Jian and Zhang, Shangzhan and Chen, Yihang and Xue, Nan and Wang, Jianyuan and Rupprecht, Christian and Cao, Xun and Zhu, Xing and Shen, Yujun and Yao, Yao and Xu, Yinghao},
-  booktitle = {European Conference on Computer Vision (ECCV)},
-  pages     = {293--314},
-  year      = {2026},
-  publisher = {Springer}
+  title={Geometric context transformer for streaming 3d reconstruction},
+  author={Chen, Lin-Zhuo and Gao, Jian and Zhang, Shangzhan and Chen, Yihang and Xue, Nan and Wang, Jianyuan and Rupprecht, Christian and Cao, Xun and Zhu, Xing and Shen, Yujun and others},
+  booktitle={European Conference on Computer Vision},
+  pages={293--314},
+  year={2026},
+  organization={Springer}
 }
 ```
 
