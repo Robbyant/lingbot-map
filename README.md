@@ -21,6 +21,15 @@ Robbyant Team
 
 https://github.com/user-attachments/assets/fe39e095-af2c-4ec9-b68d-a8ba97e505ab
 
+> [!IMPORTANT]
+> ## 🎉 LingBot-Map 2.0 is now available!
+>
+>
+> **👉 Please try our latest model:**
+> **https://github.com/Robbyant/lingbot-map-v2**
+>
+>
+
 -----
 
 ### 🗺️ Meet LingBot-Map! We've built a feed-forward 3D foundation model for streaming 3D reconstruction! 🏗️🌍
