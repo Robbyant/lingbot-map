@@ -66,6 +66,7 @@ class PointCloudViewer:
         mask_sky: Apply sky segmentation
         image_folder: Path to image folder (for sky segmentation)
         skyseg_model_path: Path to the sky segmentation ONNX model.
+        image_paths: Selected image paths in prediction order, for sky-mask cache names.
     """
 
     def __init__(
@@ -94,6 +95,7 @@ class PointCloudViewer:
         sky_mask_visualization_dir: Optional[str] = None,
         depth_stride: int = 1,
         skyseg_model_path: str = "skyseg.onnx",
+        image_paths: Optional[List[str]] = None,
     ):
         self.model = model
         self.size = size
@@ -114,6 +116,7 @@ class PointCloudViewer:
                 sky_mask_dir=sky_mask_dir,
                 sky_mask_visualization_dir=sky_mask_visualization_dir,
                 depth_stride=depth_stride,
+                image_paths=image_paths,
             )
         else:
             self.original_images = []
@@ -144,6 +147,7 @@ class PointCloudViewer:
         sky_mask_visualization_dir: Optional[str] = None,
         depth_stride: int = 1,
         skyseg_model_path: str = "skyseg.onnx",
+        image_paths: Optional[List[str]] = None,
     ) -> Tuple[List, List, List, Dict]:
         """Process prediction dictionary to extract visualization data.
 
@@ -158,6 +162,7 @@ class PointCloudViewer:
                 Frames not projected will have empty point clouds but still
                 show camera frustums and images. 1 = every frame (default).
             skyseg_model_path: Path to the sky segmentation ONNX model.
+            image_paths: Selected image paths in the same order as the predictions.
         """
         images = pred_dict["images"]  # (S, 3, H, W)
 
@@ -178,7 +183,7 @@ class PointCloudViewer:
         # Apply sky segmentation if enabled
         if mask_sky:
             conf = apply_sky_segmentation(
-                conf, image_folder=image_folder, images=images,
+                conf, image_folder=image_folder, image_paths=image_paths, images=images,
                 skyseg_model_path=skyseg_model_path,
                 sky_mask_dir=sky_mask_dir,
                 sky_mask_visualization_dir=sky_mask_visualization_dir,
