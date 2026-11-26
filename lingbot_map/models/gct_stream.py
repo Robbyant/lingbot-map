@@ -475,17 +475,17 @@ class GCTStream(GCTBase):
 
             if not is_keyframe:
                 self._set_skip_append(True)
-
-            torch.compiler.cudagraph_mark_step_begin()
-            frame_output = self.forward(
-                frame_image,
-                num_frame_for_scale=scale_frames,  # Keep same for scale token logic
-                num_frame_per_block=1,  # Single frame per block
-                causal_inference=True,
-            )
-
-            if not is_keyframe:
-                self._set_skip_append(False)
+            try:
+                torch.compiler.cudagraph_mark_step_begin()
+                frame_output = self.forward(
+                    frame_image,
+                    num_frame_for_scale=scale_frames,  # Keep same for scale token logic
+                    num_frame_per_block=1,  # Single frame per block
+                    causal_inference=True,
+                )
+            finally:
+                if not is_keyframe:
+                    self._set_skip_append(False)
 
             if dbg_every and ((i - scale_frames) % dbg_every == 0):
                 _log_kv_stats(

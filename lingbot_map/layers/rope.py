@@ -36,7 +36,7 @@ class PositionGetter:
 
     def __init__(self):
         """Initializes the position generator with an empty cache."""
-        self.position_cache: Dict[Tuple[int, int], torch.Tensor] = {}
+        self.position_cache: Dict[Tuple[int, int, torch.device], torch.Tensor] = {}
 
     def __call__(self, batch_size: int, height: int, width: int, device: torch.device) -> torch.Tensor:
         """Generates spatial positions for a batch of patches.
@@ -51,13 +51,15 @@ class PositionGetter:
             Tensor of shape (batch_size, height*width, 2) containing y,x coordinates
             for each position in the grid, repeated for each batch item.
         """
-        if (height, width) not in self.position_cache:
-            y_coords = torch.arange(height, device=device)
-            x_coords = torch.arange(width, device=device)
+        target_device = torch.device(device)
+        cache_key = (height, width, target_device)
+        if cache_key not in self.position_cache:
+            y_coords = torch.arange(height, device=target_device)
+            x_coords = torch.arange(width, device=target_device)
             positions = torch.cartesian_prod(y_coords, x_coords)
-            self.position_cache[height, width] = positions
+            self.position_cache[cache_key] = positions
 
-        cached_positions = self.position_cache[height, width]
+        cached_positions = self.position_cache[cache_key]
         return cached_positions.view(1, height * width, 2).expand(batch_size, -1, -1).clone()
 
 

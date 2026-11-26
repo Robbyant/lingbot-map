@@ -28,8 +28,12 @@ Usage:
     scene.export("output.glb")
 """
 
-from lingbot_map.vis.point_cloud_viewer import PointCloudViewer
-from lingbot_map.vis.viser_wrapper import viser_wrapper
+try:
+    from lingbot_map.vis.point_cloud_viewer import PointCloudViewer
+    from lingbot_map.vis.viser_wrapper import viser_wrapper
+except ImportError:
+    PointCloudViewer = None
+    viser_wrapper = None
 from lingbot_map.vis.utils import CameraState, colorize, colorize_np, get_vertical_colorbar
 from lingbot_map.vis.sky_segmentation import (
     apply_sky_segmentation,

@@ -23,6 +23,8 @@ from lingbot_map.vis.sky_segmentation import (
     _mask_to_uint8,
     _result_map_to_non_sky_conf,
     apply_sky_segmentation,
+    run_skyseg as _canonical_run_skyseg,
+    segment_sky as _canonical_segment_sky,
 )
 
 try:
@@ -178,7 +180,7 @@ def predictions_to_glb(
     else:
         lower_percentile = np.percentile(vertices_3d, 5, axis=0)
         upper_percentile = np.percentile(vertices_3d, 95, axis=0)
-        scene_scale = np.linalg.norm(upper_percentile - lower_percentile)
+        scene_scale = max(float(np.linalg.norm(upper_percentile - lower_percentile)), 1e-3)
 
     colormap = matplotlib.colormaps.get_cmap("gist_rainbow")
 
@@ -438,67 +440,30 @@ def compute_camera_faces_multi(cone_shape: "trimesh.Trimesh", num_shells: int) -
 def segment_sky(
     image_path: str,
     onnx_session,
-    mask_filename: str
+    mask_filename: Optional[str] = None,
 ) -> np.ndarray:
     """
     Segments sky from an image using an ONNX model.
 
-    Args:
-        image_path: Path to input image
-        onnx_session: ONNX runtime session with loaded model
-        mask_filename: Path to save the output mask
-
-    Returns:
-        Continuous non-sky confidence map in [0, 1]
+    Delegates to ``lingbot_map.vis.sky_segmentation.segment_sky`` so directory
+    creation, missing-image validation, and constant-map epsilon guards stay
+    consistent across visualization and GLB export.
     """
-    image = cv2.imread(image_path)
-    result_map = run_skyseg(onnx_session, _SKYSEG_INPUT_SIZE, image)
-    result_map_original = cv2.resize(
-        result_map, (image.shape[1], image.shape[0]), interpolation=cv2.INTER_LINEAR
-    )
-    output_mask = _result_map_to_non_sky_conf(result_map_original)
-
-    os.makedirs(os.path.dirname(mask_filename), exist_ok=True)
-    cv2.imwrite(mask_filename, _mask_to_uint8(output_mask))
-    return output_mask
+    return _canonical_segment_sky(image_path, onnx_session, output_path=mask_filename)
 
 
 def run_skyseg(
     onnx_session,
     input_size: Tuple[int, int],
-    image: np.ndarray
+    image: np.ndarray,
 ) -> np.ndarray:
     """
     Runs sky segmentation inference using ONNX model.
 
-    Args:
-        onnx_session: ONNX runtime session
-        input_size: Target size for model input (width, height)
-        image: Input image in BGR format
-
-    Returns:
-        Segmentation mask
+    Delegates to ``lingbot_map.vis.sky_segmentation.run_skyseg`` so ``(W, H)``
+    input_size ordering and uniform-output division guards match the viewer.
     """
-    temp_image = copy.deepcopy(image)
-    resize_image = cv2.resize(temp_image, dsize=(input_size[0], input_size[1]))
-    x = cv2.cvtColor(resize_image, cv2.COLOR_BGR2RGB)
-    x = np.array(x, dtype=np.float32)
-    mean = [0.485, 0.456, 0.406]
-    std = [0.229, 0.224, 0.225]
-    x = (x / 255 - mean) / std
-    x = x.transpose(2, 0, 1)
-    x = x.reshape(-1, 3, input_size[0], input_size[1]).astype("float32")
-
-    input_name = onnx_session.get_inputs()[0].name
-    output_name = onnx_session.get_outputs()[0].name
-    onnx_result = onnx_session.run([output_name], {input_name: x})
-
-    onnx_result = np.array(onnx_result).squeeze()
-    min_value = np.min(onnx_result)
-    max_value = np.max(onnx_result)
-    onnx_result = (onnx_result - min_value) / (max_value - min_value)
-    onnx_result *= 255
-    return onnx_result.astype("uint8")
+    return _canonical_run_skyseg(onnx_session, input_size, image)
 
 
 def download_file_from_url(url: str, filename: str):
