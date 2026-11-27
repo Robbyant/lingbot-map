@@ -47,6 +47,13 @@ from tqdm.auto import tqdm
 from lingbot_map.utils.pose_enc import pose_encoding_to_extri_intri
 from lingbot_map.utils.geometry import closed_form_inverse_se3_general
 from lingbot_map.utils.load_fn import load_and_preprocess_images
+from lingbot_map.utils.device import (
+    autocast_context,
+    flashinfer_usable,
+    resolve_device,
+    resolve_dtype,
+    select_attention_backend,
+)
 
 
 # =============================================================================
@@ -211,15 +218,17 @@ def _warm_streaming(model, images, scale_frames, warm_stream_n, dtype,
     warm_stream_n = max(1, min(int(warm_stream_n), num_avail - scale_frames))
     kf_int = max(int(keyframe_interval), 1)
 
-    # images: [S, 3, H, W] on device already; slice + add batch dim, no copy of
-    # spatial dims so warmup shape == real inference shape (H, W).
-    warm_scale = images[:scale_frames].unsqueeze(0).to(dtype)
-    warm_stream = images[scale_frames:scale_frames + warm_stream_n].unsqueeze(0).to(dtype)
+    # images stay on CPU host; move warmup slices to the model device below.
+    model_device = next(model.parameters()).device
+    warm_scale = images[:scale_frames].unsqueeze(0).to(device=model_device, dtype=dtype)
+    warm_stream = images[scale_frames:scale_frames + warm_stream_n].unsqueeze(0).to(
+        device=model_device, dtype=dtype
+    )
 
     for _ in range(passes):
         model.clean_kv_cache()
         torch.compiler.cudagraph_mark_step_begin()
-        with torch.no_grad(), torch.amp.autocast("cuda", dtype=dtype):
+        with torch.no_grad(), autocast_context(model_device, dtype):
             model.forward(
                 warm_scale,
                 num_frame_for_scale=scale_frames,
@@ -231,7 +240,7 @@ def _warm_streaming(model, images, scale_frames, warm_stream_n, dtype,
             if not is_keyframe:
                 model._set_skip_append(True)
             torch.compiler.cudagraph_mark_step_begin()
-            with torch.no_grad(), torch.amp.autocast("cuda", dtype=dtype):
+            with torch.no_grad(), autocast_context(model_device, dtype):
                 model.forward(
                     warm_stream[:, i:i + 1],
                     num_frame_for_scale=scale_frames,
@@ -379,15 +388,25 @@ def main():
     parser.add_argument("--camera_num_iterations", type=int, default=4,
                         help="Camera head iterative-refinement steps. Default 4; set 1 for faster inference "
                             "(skips 3 refinement passes at a small accuracy cost).")
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cpu",
+        choices=["cpu", "cuda", "auto"],
+        help="Inference device. Default: cpu (portable). "
+             "'cuda' forces GPU when available; "
+             "'auto' uses CUDA only if free VRAM looks sufficient (~8 GiB+).",
+    )
     parser.add_argument("--use_sdpa", action="store_true", default=False,
-                        help="Use SDPA backend (no flashinfer needed). Default: FlashInfer")
+                        help="Force SDPA attention backend (no FlashInfer). "
+                             "SDPA is selected automatically on CPU or when FlashInfer is missing.")
     parser.add_argument("--compile", action="store_true", default=False,
                         help="torch.compile hot modules (reduce-overhead) with a CUDA-graph warmup. "
-                            "Streaming mode only; ~5 FPS faster at 518x378. Adds ~30-60 s warmup time.")
+                            "Streaming mode + CUDA only; ~5 FPS faster at 518x378. Adds ~30-60 s warmup time.")
     parser.add_argument(
         "--offload_to_cpu",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=True,
         help="Offload per-frame predictions to CPU during inference to cut GPU peak memory "
             "(on by default).  Use --no-offload_to_cpu to keep outputs on GPU.",
     )
@@ -424,7 +443,21 @@ def main():
     assert args.image_folder or args.video_path, \
         "Provide --image_folder or --video_path"
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = resolve_device(args.device)
+    backend = select_attention_backend(device, force_sdpa=args.use_sdpa)
+    args.use_sdpa = backend == "sdpa"
+    fi_ok, fi_reason = flashinfer_usable()
+    dtype = resolve_dtype(device)
+
+    print(f"Device: {device} (requested={args.device})")
+    print(f"Attention backend: {backend}"
+          + ("" if fi_ok else f" (FlashInfer skipped: {fi_reason})"))
+    print(f"Dtype: {dtype}")
+    if device.type == "cpu":
+        print(
+            "CPU mode: expected to be much slower than GPU; "
+            "FlashInfer is not required. Tip: export OMP_NUM_THREADS to match cores."
+        )
 
     # ── Load images & model ──────────────────────────────────────────────────
     t0 = time.time()
@@ -450,26 +483,21 @@ def main():
     model = load_model(args, device)
     print(f"Total load time: {time.time() - t0:.1f}s")
 
-    # Pick inference dtype; autocast still runs for the ops that need fp32 (e.g. LayerNorm).
-    if torch.cuda.is_available():
-        dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
-    else:
-        dtype = torch.float32
-
     # Cast the aggregator (DINOv2-style trunk) to the inference dtype to remove the
     # redundant fp32 master weight copy + autocast bf16 weight cache (~2-3 GB saved,
     # no measurable quality change). gct_base._predict_* upcasts inputs to fp32 and
     # runs each head under `autocast(enabled=False)`, so camera/depth/point heads
-    # keep fp32 weights automatically.
+    # keep fp32 weights automatically. Skipped on CPU (already fp32).
     if dtype != torch.float32 and getattr(model, "aggregator", None) is not None:
         print(f"Casting aggregator to {dtype} (heads kept in fp32)")
         model.aggregator = model.aggregator.to(dtype=dtype)
 
-    images = images.to(device)
+    # Keep the full image batch on CPU; inference_* moves frames to the model device.
+    images = images.cpu()
     num_frames = images.shape[0]
-    print(f"Input: {num_frames} frames, shape {tuple(images.shape)}")
+    print(f"Input: {num_frames} frames, shape {tuple(images.shape)} (host/CPU storage)")
     print(f"Mode: {args.mode}")
-    if torch.cuda.is_available():
+    if device.type == "cuda":
         torch.cuda.empty_cache()
         print(
             f"GPU mem after load: "
@@ -504,9 +532,11 @@ def main():
                 f"(window_size={args.window_size} keyframes, scale={args.num_scale_frames})."
             )
 
-    # ── Optional: torch.compile + CUDA-graph warmup (streaming only) ────────
+    # ── Optional: torch.compile + CUDA-graph warmup (streaming + CUDA only) ─
     if args.compile:
-        if args.mode != "streaming":
+        if device.type != "cuda":
+            print("--compile requires CUDA; skipping on CPU.")
+        elif args.mode != "streaming":
             print(
                 f"--compile only applies to --mode streaming (got {args.mode!r}); "
                 "skipping compile."
@@ -543,12 +573,12 @@ def main():
             print(f"  compiled warmup: {time.time() - t_warm:.1f}s")
 
     # ── Inference ────────────────────────────────────────────────────────────
-    print(f"Running {args.mode} inference (dtype={dtype})...")
+    print(f"Running {args.mode} inference (dtype={dtype}, device={device}, backend={backend})...")
     t0 = time.time()
 
     output_device = torch.device("cpu") if args.offload_to_cpu else None
 
-    with torch.no_grad(), torch.amp.autocast("cuda", dtype=dtype):
+    with torch.no_grad(), autocast_context(device, dtype):
         if args.mode == "streaming":
             predictions = model.inference_streaming(
                 images,
@@ -568,7 +598,7 @@ def main():
             )
 
     print(f"Inference done in {time.time() - t0:.1f}s")
-    if torch.cuda.is_available():
+    if device.type == "cuda":
         print(
             f"GPU peak during inference: "
             f"{torch.cuda.max_memory_allocated()/1e9:.2f} GB "

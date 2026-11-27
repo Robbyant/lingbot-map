@@ -1,10 +1,15 @@
 model: lingbot_map
 env: lingbot-map
 _checkpoint: /path/to/lingbot-map.pt
-_device: cuda
+# Device: cpu (portable default), cuda, or auto (CUDA only if free VRAM ≥ ~8 GiB).
+# Laptop / low-VRAM GPUs should keep cpu — the checkpoint alone is ~4.4 GB.
+_device: cpu
 _mode: streaming
+# AMP is ignored / disabled on CPU by the method wrapper.
 _use_amp: true
-_use_sdpa: false  # Force FlashInfer backend (paged KV cache attention)
+# true = force SDPA. false = try FlashInfer on CUDA when installed; SDPA otherwise.
+# FlashInfer is optional and not required for correct results.
+_use_sdpa: true
 _image_size: 518
 _patch_size: 14
 _enable_3d_rope: true

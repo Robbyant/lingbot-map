@@ -13,6 +13,12 @@ from typing import Any, Dict, List, Optional
 
 from benchmark.method.base import BaseMethod
 from benchmark.core.loader import BSSLoader
+from lingbot_map.utils.device import (
+    autocast_context,
+    resolve_device,
+    resolve_dtype,
+    select_attention_backend,
+)
 
 
 # Mirrors lingbot-map/demo.py:413-421 — above this frame count, the KV cache
@@ -48,7 +54,7 @@ class LingbotMapMethod(BaseMethod):
     def __init__(
         self,
         checkpoint: str = None,
-        device: str = 'cuda',
+        device: str = 'cpu',
         mode: str = 'streaming',
         use_amp: bool = True,
         use_sdpa: bool = False,
@@ -77,10 +83,13 @@ class LingbotMapMethod(BaseMethod):
         )
 
         self.checkpoint = checkpoint
-        self.device = device
+        # Resolve device early so AMP / SDPA defaults are correct on CPU.
+        self.device = str(resolve_device(device))
         self.mode = mode
-        self.use_amp = use_amp
-        self.use_sdpa = use_sdpa
+        self.use_amp = use_amp and self.device.startswith("cuda")
+        # Auto-select SDPA on CPU or when FlashInfer is missing; honor explicit True.
+        backend = select_attention_backend(self.device, force_sdpa=bool(use_sdpa))
+        self.use_sdpa = backend == "sdpa"
         self.image_size = image_size
         self.patch_size = patch_size
         self.enable_3d_rope = enable_3d_rope
@@ -143,20 +152,22 @@ class LingbotMapMethod(BaseMethod):
         from torchvision import transforms as TF
 
         to_tensor = TF.ToTensor()
+        # Keep batch on CPU; inference_* moves frames to the model device.
         images = torch.stack([to_tensor(rgb) for rgb in rgb_list])
-        return images.to(self.device)
+        return images
 
     def _run_inference(self, images):
         """Run LingbotMap inference and return raw predictions dict."""
-        if self.use_amp:
-            dtype = torch.bfloat16 if torch.cuda.get_device_capability()[0] >= 8 else torch.float16
+        device = torch.device(self.device)
+        if self.use_amp and device.type == "cuda":
+            dtype = resolve_dtype(device)
         else:
             dtype = torch.float32
 
-        print(f"  → Running {self.mode} inference (dtype: {dtype})")
+        print(f"  → Running {self.mode} inference (dtype: {dtype}, device: {device}, sdpa: {self.use_sdpa})")
 
         num_frames = images.shape[0]
-        with torch.no_grad(), torch.amp.autocast("cuda", dtype=dtype):
+        with torch.no_grad(), autocast_context(device, dtype):
             if self.mode == 'streaming':
                 keyframe_interval = _resolve_keyframe_interval(
                     self.keyframe_interval, num_frames, self.auto_keyframe_threshold
